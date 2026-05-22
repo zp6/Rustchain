@@ -53,6 +53,40 @@ def _parse_free_memory_gb(output):
     return None
 
 
+def _parse_int_output(output):
+    try:
+        return int(str(output).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_memory_bytes_to_gb(output):
+    memory_bytes = _parse_int_output(output)
+    if memory_bytes is None or memory_bytes <= 0:
+        return None
+    return max(1, round(memory_bytes / (1024 ** 3)))
+
+
+def _parse_wmic_value(output, key):
+    prefix = f"{key}="
+    for line in str(output or "").splitlines():
+        line = line.strip()
+        if line.lower().startswith(prefix.lower()):
+            return line[len(prefix):].strip()
+    return ""
+
+
+def _linux_miner_platform_warning(system):
+    if system in ("Linux", "Darwin"):
+        return ""
+    system_name = system or "unknown"
+    return (
+        f"{system_name} is not a primary supported platform for this Linux miner; "
+        "hardware probes may be incomplete, so CPU, serial, and fingerprint results "
+        "can be degraded. Use a native Linux runtime for reliable attestation."
+    )
+
+
 def _safe_id_part(value):
     slug = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", str(value or "").strip().lower()).strip("-")
     return slug or "unknown"
@@ -152,6 +186,9 @@ class LocalMiner:
         print(f"Node: {self.node_url}")
         print(f"Wallet: {self.wallet}")
         print(f"Serial: {self.serial}")
+        platform_warning = _linux_miner_platform_warning(platform.system())
+        if platform_warning:
+            print(f"[WARN] {platform_warning}")
         print("="*70)
 
         # Run initial fingerprint check
@@ -286,14 +323,16 @@ class LocalMiner:
 
     def _get_hw_info(self):
         """Collect hardware info"""
+        system = platform.system()
         machine = platform.machine().lower()
         hw = {
-            "platform": platform.system(),
+            "platform": system,
             "machine": platform.machine(),
             "hostname": socket.gethostname(),
             "family": "x86",
             "arch": "modern",  # Less than 10 years old
-            "serial": get_linux_serial()  # Hardware serial for v2 binding
+            "serial": get_linux_serial(),  # Hardware serial for v2 binding
+            "probe_warning": _linux_miner_platform_warning(system)
         }
 
         # Detect architecture family from platform.machine() FIRST
@@ -330,15 +369,44 @@ class LocalMiner:
             hw["arch"] = machine
 
         # Get CPU
-        cpu = _parse_lscpu_model(self._run_cmd(["lscpu"]))
+        if system == "Darwin":
+            cpu = (self._run_cmd(["sysctl", "-n", "machdep.cpu.brand_string"]) or "").strip()
+        elif system == "Windows":
+            cpu = (
+                _parse_wmic_value(self._run_cmd(["wmic", "cpu", "get", "Name", "/value"]), "Name")
+                or platform.processor()
+                or ""
+            ).strip()
+        else:
+            cpu = _parse_lscpu_model(self._run_cmd(["lscpu"]))
         hw["cpu"] = cpu or "Unknown"
 
         # Get cores
-        cores = self._run_cmd(["nproc"])
-        hw["cores"] = int(cores) if cores else 6
+        if system == "Darwin":
+            cores = _parse_int_output(self._run_cmd(["sysctl", "-n", "hw.ncpu"]))
+        elif system == "Windows":
+            cores = _parse_int_output(
+                _parse_wmic_value(
+                    self._run_cmd(["wmic", "cpu", "get", "NumberOfLogicalProcessors", "/value"]),
+                    "NumberOfLogicalProcessors",
+                )
+            )
+        else:
+            cores = _parse_int_output(self._run_cmd(["nproc"]))
+        hw["cores"] = cores or os.cpu_count() or 1
 
         # Get memory
-        mem = _parse_free_memory_gb(self._run_cmd(["free", "-g"]))
+        if system == "Darwin":
+            mem = _parse_memory_bytes_to_gb(self._run_cmd(["sysctl", "-n", "hw.memsize"]))
+        elif system == "Windows":
+            mem = _parse_memory_bytes_to_gb(
+                _parse_wmic_value(
+                    self._run_cmd(["wmic", "computersystem", "get", "TotalPhysicalMemory", "/value"]),
+                    "TotalPhysicalMemory",
+                )
+            )
+        else:
+            mem = _parse_free_memory_gb(self._run_cmd(["free", "-g"]))
         hw["memory_gb"] = mem if mem is not None else 32
 
         # Get MACs (ensures PoA signal uses real hardware data)
@@ -569,6 +637,8 @@ class LocalMiner:
             print(f"[DRY-RUN] TLS verify: {True}")
 
         self._get_hw_info()
+        if self.hw_info.get("probe_warning"):
+            print(f"[DRY-RUN] Platform warning: {self.hw_info['probe_warning']}")
         print(f"[DRY-RUN] Node URL: {self.node_url}")
         print(f"[DRY-RUN] Wallet: {self.wallet}")
         print(f"[DRY-RUN] Hostname: {self.hw_info.get('hostname')}")
@@ -668,7 +738,11 @@ if __name__ == "__main__":
     parser.add_argument("--wart-pool", help="Warthog mining pool API URL")
     parser.add_argument("--bzminer-path", help="Path to BzMiner binary")
     parser.add_argument("--manage-bzminer", action="store_true", help="Auto-start/stop BzMiner")
-    parser.add_argument("--dry-run", action="store_true", help="Run preflight checks only; do not start mining")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run preflight checks only; print hardware fingerprint info; do not start mining",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output showing API endpoints, headers, and response details")
     parser.add_argument("--show-payload", action="store_true", help="Show request payload in dry-run mode")
     args = parser.parse_args()

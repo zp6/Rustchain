@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Dict, Optional, Tuple
 
 
 MICRO_RTC = Decimal("1000000")
+MAX_I64 = 2**63 - 1
 
 
 def _is_rtc_address(value: str) -> bool:
@@ -43,36 +45,58 @@ def _amount_i64(amount_rtc: Decimal) -> int:
     return int((amount_rtc * MICRO_RTC).to_integral_value(rounding=ROUND_DOWN))
 
 
+def _validate_amount_i64(amount_rtc: Decimal) -> Tuple[Optional[int], str]:
+    amount_i64 = _amount_i64(amount_rtc)
+    if amount_i64 <= 0:
+        return None, "amount_too_small_after_quantization"
+    if amount_i64 > MAX_I64:
+        return None, "amount_exceeds_i64"
+    return amount_i64, ""
+
+
+def _miner_id_field(value: Any) -> Tuple[Optional[str], str]:
+    if value is None or value == "":
+        return None, "missing_from_or_to"
+    if not isinstance(value, str):
+        return None, "invalid_from_or_to_type"
+    value = value.strip()
+    if not value:
+        return None, "missing_from_or_to"
+    return value, ""
+
+
 def validate_wallet_transfer_admin(payload: Any) -> PreflightResult:
     """Validate POST /wallet/transfer payload shape (admin transfer)."""
     data, err = _as_dict(payload)
     if err:
         return PreflightResult(ok=False, error=err, details={})
 
-    from_miner = data.get("from_miner")
-    to_miner = data.get("to_miner")
+    from_miner, from_err = _miner_id_field(data.get("from_miner"))
+    to_miner, to_err = _miner_id_field(data.get("to_miner"))
     amount_rtc, aerr = _safe_decimal(data.get("amount_rtc", 0))
 
-    if not from_miner or not to_miner:
-        return PreflightResult(ok=False, error="missing_from_or_to", details={})
+    if from_err or to_err:
+        return PreflightResult(ok=False, error=from_err or to_err, details={})
     if aerr:
         return PreflightResult(ok=False, error=aerr, details={})
     if amount_rtc is None or amount_rtc <= 0:
         return PreflightResult(ok=False, error="amount_must_be_positive", details={})
-    amount_i64 = _amount_i64(amount_rtc)
-    if amount_i64 <= 0:
+    amount_i64, ierr = _validate_amount_i64(amount_rtc)
+    if ierr == "amount_too_small_after_quantization":
         return PreflightResult(
             ok=False,
             error="amount_too_small_after_quantization",
             details={"amount_rtc": float(amount_rtc), "min_rtc": 0.000001},
         )
+    if ierr:
+        return PreflightResult(ok=False, error=ierr, details={})
 
     return PreflightResult(
         ok=True,
         error="",
         details={
-            "from_miner": str(from_miner),
-            "to_miner": str(to_miner),
+            "from_miner": from_miner,
+            "to_miner": to_miner,
             "amount_rtc": float(amount_rtc),
             "amount_i64": amount_i64,
         },
@@ -86,7 +110,7 @@ def validate_wallet_transfer_signed(payload: Any) -> PreflightResult:
         return PreflightResult(ok=False, error=err, details={})
 
     required = ["from_address", "to_address", "amount_rtc", "nonce", "signature"]
-    missing = [k for k in required if not data.get(k)]
+    missing = [k for k in required if k not in data or data.get(k) in (None, "")]
     if missing:
         return PreflightResult(ok=False, error="missing_required_fields", details={"missing": missing})
 
@@ -97,13 +121,20 @@ def validate_wallet_transfer_signed(payload: Any) -> PreflightResult:
         return PreflightResult(ok=False, error=aerr, details={})
     if amount_rtc is None or amount_rtc <= 0:
         return PreflightResult(ok=False, error="amount_must_be_positive", details={})
-    amount_i64 = _amount_i64(amount_rtc)
-    if amount_i64 <= 0:
+    amount_i64, ierr = _validate_amount_i64(amount_rtc)
+    if ierr == "amount_too_small_after_quantization":
         return PreflightResult(
             ok=False,
             error="amount_too_small_after_quantization",
             details={"amount_rtc": float(amount_rtc), "min_rtc": 0.000001},
         )
+    if ierr:
+        return PreflightResult(ok=False, error=ierr, details={})
+    fee_rtc, ferr = _safe_decimal(data.get("fee_rtc", 0))
+    if ferr:
+        return PreflightResult(ok=False, error=ferr, details={"field": "fee_rtc"})
+    if fee_rtc is None or fee_rtc < 0:
+        return PreflightResult(ok=False, error="fee_must_be_non_negative", details={})
 
     if not (_is_rtc_address(from_address) or _is_bcn_address(from_address)):
         return PreflightResult(ok=False, error="invalid_from_address_format", details={})
@@ -121,6 +152,10 @@ def validate_wallet_transfer_signed(payload: Any) -> PreflightResult:
     if nonce_int <= 0:
         return PreflightResult(ok=False, error="nonce_must_be_gt_zero", details={})
 
+    chain_id = str(data.get("chain_id", "")).strip()
+    if chain_id and not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", chain_id):
+        return PreflightResult(ok=False, error="invalid_chain_id_format", details={})
+
     return PreflightResult(
         ok=True,
         error="",
@@ -129,6 +164,8 @@ def validate_wallet_transfer_signed(payload: Any) -> PreflightResult:
             "to_address": to_address,
             "amount_rtc": float(amount_rtc),
             "amount_i64": amount_i64,
+            "fee_rtc": float(fee_rtc),
             "nonce": nonce_int,
+            "chain_id": chain_id or None,
         },
     )

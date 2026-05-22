@@ -4,7 +4,11 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+from flask import Flask
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from node import gpu_render_protocol
 from node.gpu_render_protocol import GPURenderProtocol
 
 
@@ -154,6 +158,30 @@ class TestGPURenderProtocol(unittest.TestCase):
         self.assertTrue(check["manipulated"])
         self.assertEqual(check["reason"], "price_too_high")
 
+    def test_price_manipulation_detection_normalizes_job_type(self):
+        self.proto.attest_gpu("miner-1", {
+            "gpu_model": "RTX 4090", "vram_gb": 24, "device_arch": "nvidia_gpu",
+            "price_render_minute": 0.5,
+        })
+
+        for job_type in ("RENDER", " render "):
+            check = self.proto.detect_price_manipulation(job_type, 10.0)
+            self.assertTrue(check["manipulated"])
+            self.assertEqual(check["reason"], "price_too_high")
+
+    def test_job_type_filters_are_allowlisted_and_normalized(self):
+        self.proto.attest_gpu("miner-1", {
+            "gpu_model": "RTX 4090",
+            "vram_gb": 24,
+            "device_arch": "nvidia_gpu",
+            "supports_render": 1,
+        })
+
+        self.assertEqual(len(self.proto.list_gpu_nodes(" RENDER ")), 1)
+        self.assertEqual(self.proto.list_gpu_nodes("render;DROP TABLE gpu_attestations"), [])
+        rates = self.proto.get_fair_market_rates("render;DROP TABLE gpu_attestations")
+        self.assertIn("error", rates)
+
     def test_voice_escrow_types(self):
         for jt in ("tts", "stt"):
             result = self.proto.create_escrow(jt, "a", "b", 2.0)
@@ -166,6 +194,119 @@ class TestGPURenderProtocol(unittest.TestCase):
         self.assertEqual(result["status"], "locked")
         status = self.proto.get_escrow(result["job_id"])
         self.assertEqual(status["metadata"]["model"], "llama-70b")
+
+
+def _route_client(tmp_path, monkeypatch):
+    proto = GPURenderProtocol(db_path=str(tmp_path / "gpu_routes.db"))
+    monkeypatch.setattr(gpu_render_protocol, "GPURenderProtocol", lambda: proto)
+    app = Flask(__name__)
+    app.config["TESTING"] = True
+    gpu_render_protocol.register_routes(app)
+    return app.test_client()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/gpu/attest",
+        "/render/escrow",
+        "/voice/escrow",
+        "/llm/escrow",
+        "/render/release",
+        "/voice/release",
+        "/llm/release",
+        "/render/refund",
+        "/render/pricing/check",
+    ],
+)
+def test_gpu_protocol_routes_reject_non_object_json(tmp_path, monkeypatch, path):
+    client = _route_client(tmp_path, monkeypatch)
+
+    response = client.post(path, json=[{"unexpected": "array"}])
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "JSON object required"}
+
+
+def test_gpu_protocol_escrow_rejects_structured_wallet(tmp_path, monkeypatch):
+    client = _route_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/render/escrow",
+        json={
+            "job_type": "render",
+            "from_wallet": {"wallet": "payer"},
+            "to_wallet": "provider",
+            "amount_rtc": 1,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "from_wallet must be a string"}
+
+
+def test_gpu_protocol_pricing_check_rejects_structured_price(tmp_path, monkeypatch):
+    client = _route_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/render/pricing/check",
+        json={"job_type": "render", "price": ["not", "numeric"]},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "price must be a finite number"}
+
+
+def test_gpu_protocol_escrow_rejects_boolean_amount(tmp_path, monkeypatch):
+    client = _route_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/render/escrow",
+        json={
+            "job_type": "render",
+            "from_wallet": "payer",
+            "to_wallet": "provider",
+            "amount_rtc": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "amount_rtc must be a finite number"}
+
+
+def test_gpu_protocol_pricing_check_rejects_boolean_price(tmp_path, monkeypatch):
+    client = _route_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/render/pricing/check",
+        json={"job_type": "render", "price": True},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "price must be a finite number"}
+
+
+def test_gpu_protocol_pricing_check_normalizes_job_type(tmp_path, monkeypatch):
+    client = _route_client(tmp_path, monkeypatch)
+    client.post(
+        "/gpu/attest",
+        json={
+            "miner_id": "miner-1",
+            "gpu_model": "RTX 4090",
+            "vram_gb": 24,
+            "device_arch": "nvidia_gpu",
+            "price_render_minute": 0.5,
+        },
+    )
+
+    response = client.post(
+        "/render/pricing/check",
+        json={"job_type": " RENDER ", "price": 10.0},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["manipulated"] is True
+    assert response.get_json()["reason"] == "price_too_high"
 
 
 if __name__ == "__main__":

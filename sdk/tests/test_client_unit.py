@@ -3,14 +3,11 @@ Unit tests for RustChain Client (with mocked responses)
 """
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from rustchain import RustChainClient
 from rustchain.exceptions import (
     ConnectionError,
     ValidationError,
-    APIError,
-    AttestationError,
-    TransferError,
 )
 
 
@@ -163,9 +160,30 @@ class TestMinersEndpoint:
 
         assert miners == []
 
+    @patch("requests.Session.request")
+    def test_miners_envelope_response(self, mock_request):
+        """Test miners endpoint returning an envelope."""
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "miner": "miner-envelope",
+                    "hardware_type": "PowerPC G4",
+                }
+            ],
+            "pagination": {"total": 1},
+        }
+        mock_response.raise_for_status = Mock()
+        mock_request.return_value = mock_response
+
+        with RustChainClient("https://rustchain.org") as client:
+            miners = client.miners()
+
+        assert miners == [{"miner": "miner-envelope", "hardware_type": "PowerPC G4"}]
+
 
 class TestBalanceEndpoint:
-    """Test /balance endpoint"""
+    """Test /wallet/balance endpoint"""
 
     @patch("requests.Session.request")
     def test_balance_success(self, mock_request):
@@ -186,6 +204,9 @@ class TestBalanceEndpoint:
         assert balance["balance"] == 123.456
         assert balance["epoch_rewards"] == 10.0
         assert balance["total_earned"] == 1000.0
+        mock_request.assert_called_once()
+        assert mock_request.call_args.kwargs["url"] == "https://rustchain.org/wallet/balance"
+        assert mock_request.call_args.kwargs["params"] == {"miner_id": "test_wallet_address"}
 
     def test_balance_empty_miner_id(self):
         """Test balance with empty miner_id raises ValidationError"""

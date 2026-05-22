@@ -14,6 +14,7 @@ Part of Bounty #2303: wRTC Solana Bridge Dashboard
 
 import os
 import json
+import logging
 import time
 from flask import Blueprint, jsonify, request
 
@@ -33,6 +34,7 @@ WRTC_MINT_ADDRESS = os.environ.get("WRTC_MINT_ADDRESS", "")
 # Cache configuration (in-memory for simplicity)
 CACHE_TTL = 30  # seconds
 _price_cache = {"data": None, "timestamp": 0}
+logger = logging.getLogger(__name__)
 
 # ─── Blueprint ────────────────────────────────────────────────────────────────
 dashboard_bp = Blueprint("dashboard", __name__, url_prefix="/bridge/dashboard")
@@ -152,8 +154,9 @@ def get_bridge_health():
             conn.execute("SELECT 1").fetchone()
         health["rustchain"] = True
         details["rustchain"] = "Database accessible"
-    except Exception as e:
-        details["rustchain"] = f"Database error: {str(e)}"
+    except Exception:
+        logger.exception("Dashboard health database check failed")
+        details["rustchain"] = "Database unavailable"
 
     # Check Solana RPC (sync version)
     try:
@@ -173,8 +176,9 @@ def get_bridge_health():
                 details["solana_rpc"] = "RPC responsive"
             else:
                 details["solana_rpc"] = "RPC returned unexpected response"
-    except Exception as e:
-        details["solana_rpc"] = f"RPC error: {str(e)}"
+    except Exception:
+        logger.exception("Dashboard health Solana RPC check failed")
+        details["solana_rpc"] = "RPC unavailable"
 
     # Bridge API is healthy if we got here
     health["bridge_api"] = True
@@ -200,8 +204,9 @@ def get_bridge_health():
                     details["wrtc_mint"] = "Mint account exists"
                 else:
                     details["wrtc_mint"] = "Mint account not found"
-        except Exception as e:
-            details["wrtc_mint"] = f"Mint check error: {str(e)}"
+        except Exception:
+            logger.exception("Dashboard health wRTC mint check failed")
+            details["wrtc_mint"] = "Mint check unavailable"
     else:
         health["wrtc_mint"] = True  # Skip if not configured
         details["wrtc_mint"] = "Mint address not configured"
@@ -242,11 +247,16 @@ def get_dashboard_transactions():
     }
     """
     tx_type = request.args.get("type", "all").lower()
+    if tx_type not in ("all", "wrap", "unwrap"):
+        return jsonify({"error": "type must be one of: all, wrap, unwrap"}), 400
+
     state_filter = request.args.get("state", "").strip() or None
     try:
-        limit = min(int(request.args.get("limit", 50)), 200)
-    except ValueError:
-        limit = 50
+        raw_limit = request.args.get("limit")
+        limit = int(raw_limit) if raw_limit not in (None, "") else 50
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+    limit = max(1, min(limit, 200))
 
     now = int(time.time())
     day_ago = now - 86400
@@ -259,6 +269,12 @@ def get_dashboard_transactions():
         if state_filter:
             where_clauses.append("state = ?")
             params.append(state_filter)
+        if tx_type == "wrap":
+            where_clauses.append("target_chain = ?")
+            params.append("solana")
+        elif tx_type == "unwrap":
+            where_clauses.append("target_chain = ?")
+            params.append("base")
 
         # Calculate 24h volume
         volume_row = conn.execute(

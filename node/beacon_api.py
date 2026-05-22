@@ -4,6 +4,8 @@ Beacon Atlas API - Flask routes for 3D visualization backend
 Provides endpoints for agents, contracts, bounties, reputation, and chat.
 """
 import json
+import html
+import math
 import os
 import time
 import hashlib
@@ -33,6 +35,31 @@ contract_store = []
 
 # Chat session store
 chat_sessions = {}
+
+
+def _json_object_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, jsonify({'error': 'JSON object body required'}), 400
+    return data, None, None
+
+
+def _required_text_field(data, field_name):
+    value = data.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        return None, jsonify({'error': f'Missing {field_name}'}), 400
+    return value.strip(), None, None
+
+
+def _positive_float_field(data, field_name):
+    value = data.get(field_name)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, jsonify({'error': f'{field_name} must be a positive number'}), 400
+    if not math.isfinite(number) or number <= 0:
+        return None, jsonify({'error': f'{field_name} must be a positive number'}), 400
+    return number, None, None
 
 
 def _coinbase_addresses_match(left, right):
@@ -328,7 +355,7 @@ def beacon_join():
 
     try:
         data = request.get_json(silent=True)
-        if not data:
+        if not isinstance(data, dict):
             return jsonify({'error': 'Invalid or missing JSON body'}), 400
 
         # Validate required fields
@@ -339,6 +366,10 @@ def beacon_join():
             return jsonify({'error': 'Missing required field: agent_id'}), 400
         if not pubkey_hex:
             return jsonify({'error': 'Missing required field: pubkey_hex'}), 400
+        if not isinstance(agent_id, str):
+            return jsonify({'error': 'Invalid agent_id: must be a string'}), 400
+        if not isinstance(pubkey_hex, str):
+            return jsonify({'error': 'Invalid pubkey_hex: must be a string'}), 400
 
         # Validate pubkey_hex format (must be valid hex string, optionally with 0x prefix)
         pubkey_clean = pubkey_hex.strip()
@@ -357,6 +388,10 @@ def beacon_join():
         # Optional fields
         name = data.get('name')
         coinbase_address = data.get('coinbase_address')
+        if name is not None and not isinstance(name, str):
+            return jsonify({'error': 'Invalid name: must be a string'}), 400
+        if coinbase_address is not None and not isinstance(coinbase_address, str):
+            return jsonify({'error': 'Invalid coinbase_address: must be a string'}), 400
         
         # Validate coinbase_address if provided (should be 0x-prefixed, 40 hex chars)
         if coinbase_address:
@@ -566,12 +601,16 @@ def create_contract():
         # Generate contract ID
         contract_id = f"ctr_{int(time.time())}_{hashlib.blake2b(str(time.time()).encode(), digest_size=4).hexdigest()}"
         
+        amount, amount_error, amount_status = _positive_float_field(data, 'amount')
+        if amount_error:
+            return amount_error, amount_status
+
         contract = {
             'id': contract_id,
             'from': data['from'],
             'to': data['to'],
             'type': data['type'],
-            'amount': float(data['amount']),
+            'amount': amount,
             'currency': data.get('currency', 'RTC'),
             'term': data['term'],
             'state': 'offered',  # Initial state
@@ -661,7 +700,7 @@ def update_contract(contract_id):
                     'error': 'Only the recipient (to_agent) can accept this contract'
                 }), 403
         if current_state == 'offered' and new_state == 'rejected':
-            if agent_key != to_agent:
+            if caller_agent != to_agent:
                 return jsonify({
                     'error': 'Only the recipient (to_agent) can reject this contract'
                 }), 403
@@ -857,11 +896,12 @@ def claim_bounty(bounty_id):
         if not hmac.compare_digest(provided_key, admin_key):
             return jsonify({'error': 'Unauthorized — admin key required to claim bounties'}), 401
 
-        data = request.get_json()
-        agent_id = data.get('agent_id')
-        
-        if not agent_id:
-            return jsonify({'error': 'Missing agent_id'}), 400
+        data, body_error, status = _json_object_body()
+        if body_error:
+            return body_error, status
+        agent_id, field_error, status = _required_text_field(data, 'agent_id')
+        if field_error:
+            return field_error, status
         
         db = get_db()
         db.execute(
@@ -891,11 +931,12 @@ def complete_bounty(bounty_id):
         if not hmac.compare_digest(provided_key, admin_key):
             return jsonify({'error': 'Unauthorized — admin key required to complete bounties'}), 401
 
-        data = request.get_json()
-        agent_id = data.get('agent_id')
-        
-        if not agent_id:
-            return jsonify({'error': 'Missing agent_id'}), 400
+        data, body_error, status = _json_object_body()
+        if body_error:
+            return body_error, status
+        agent_id, field_error, status = _required_text_field(data, 'agent_id')
+        if field_error:
+            return field_error, status
         
         db = get_db()
 
@@ -992,23 +1033,31 @@ def get_agent_reputation(agent_id):
 def chat():
     """Send message to an agent (mock response for demo)."""
     try:
-        data = request.get_json()
-        agent_id = data.get('agent_id')
-        message = data.get('message')
+        data, body_error, status = _json_object_body()
+        if body_error:
+            return body_error, status
+        agent_id, field_error, status = _required_text_field(data, 'agent_id')
+        if field_error:
+            return field_error, status
+        message, field_error, status = _required_text_field(data, 'message')
+        if field_error:
+            return field_error, status
         
         if not agent_id or not message:
             return jsonify({'error': 'Missing agent_id or message'}), 400
+        safe_agent_id = html.escape(str(agent_id), quote=True)
+        safe_message = html.escape(str(message), quote=True)
         
         # Store user message
         db = get_db()
         db.execute(
             "INSERT INTO beacon_chat (agent_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (agent_id, 'user', message, int(time.time()))
+            (agent_id, 'user', safe_message, int(time.time()))
         )
         
         # Generate mock response (in production, call LLM)
         responses = [
-            f"Acknowledged. I am {agent_id}. How can I assist?",
+            f"Acknowledged. I am {safe_agent_id}. How can I assist?",
             "Transmission received. Processing request...",
             "Beacon signal strong. Standing by for instructions.",
             "Contract terms acceptable. Ready to proceed.",
@@ -1026,7 +1075,7 @@ def chat():
         
         return jsonify({
             'response': response,
-            'agent': agent_id,
+            'agent': safe_agent_id,
             'timestamp': int(time.time()),
         })
         

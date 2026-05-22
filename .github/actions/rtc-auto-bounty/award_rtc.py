@@ -32,6 +32,7 @@ Environment variables (set by the action):
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -70,6 +72,20 @@ _BOUNTY_RE = re.compile(
 # Marker to prevent duplicate awards.
 _AWARD_MARKER = "RTC-AutoBounty-Awarded"
 
+_ENDPOINT_UNREACHABLE_PATTERNS = (
+    "connection failed:",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "timed out",
+    "timeout",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "no route to host",
+    "network is unreachable",
+    "host is unreachable",
+)
+
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
@@ -79,15 +95,23 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def _env_stripped(name: str, default: str = "") -> str:
+    return _env(name, default).strip()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
-    return _env(name, str(default)).lower() in ("true", "1", "yes")
+    return _env_stripped(name, str(default)).lower() in ("true", "1", "yes")
 
 
 def _env_float(name: str, default: float = 0.0) -> float:
     try:
-        return float(_env(name, str(default)))
+        return float(_env_stripped(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _is_finite_amount(value: float) -> bool:
+    return math.isfinite(value)
 
 
 class Config:
@@ -95,21 +119,25 @@ class Config:
 
     def __init__(self) -> None:
         self.rtc_amount: float = _env_float("INPUT_RTC_AMOUNT", 50.0)
-        self.vps_host: str = _env("INPUT_RTC_VPS_HOST")
-        self.admin_key: str = _env("INPUT_RTC_ADMIN_KEY")
-        self.from_wallet: str = _env("INPUT_FROM_WALLET", "founder_community")
+        self.rtc_api_url: str = _env_stripped("INPUT_RTC_API_URL")
+        self.vps_host: str = _env_stripped("INPUT_RTC_VPS_HOST")
+        self.admin_key: str = _env_stripped("INPUT_RTC_ADMIN_KEY")
+        self.from_wallet: str = _env_stripped("INPUT_FROM_WALLET", "founder_community")
         self.dry_run: bool = _env_bool("INPUT_DRY_RUN")
         self.post_comment: bool = _env_bool("INPUT_POST_COMMENT", True)
-        self.github_token: str = _env("INPUT_GITHUB_TOKEN", _env("GITHUB_TOKEN"))
-        self.repo_path: str = _env("INPUT_REPO_PATH", ".")
+        self.github_token: str = _env_stripped(
+            "INPUT_GITHUB_TOKEN",
+            _env_stripped("GITHUB_TOKEN"),
+        )
+        self.repo_path: str = _env_stripped("INPUT_REPO_PATH", ".")
         self.max_amount: float = _env_float("INPUT_MAX_AMOUNT", 10000.0)
-        self.repo: str = _env("GITHUB_REPOSITORY")
-        self.pr_number: str = _env("PR_NUMBER")
-        self.pr_author: str = _env("PR_AUTHOR", _env("PR_AUTHOR"))
-        self.pr_merged: str = _env("PR_MERGED")
+        self.repo: str = _env_stripped("GITHUB_REPOSITORY")
+        self.pr_number: str = _env_stripped("PR_NUMBER")
+        self.pr_author: str = _env_stripped("PR_AUTHOR", _env_stripped("PR_AUTHOR"))
+        self.pr_merged: str = _env_stripped("PR_MERGED")
         self.pr_body: str = _env("PR_BODY", "")
-        self.pr_head_sha: str = _env("PR_HEAD_SHA", "")
-        self.pr_title: str = _env("PR_TITLE", "")
+        self.pr_head_sha: str = _env_stripped("PR_HEAD_SHA", "")
+        self.pr_title: str = _env_stripped("PR_TITLE", "")
 
     def validate(self) -> Optional[str]:
         """Return an error string if required config is missing, else None."""
@@ -119,12 +147,18 @@ class Config:
             return "GITHUB_REPOSITORY is not set"
         if not self.pr_number:
             return "PR_NUMBER is not set"
-        if not self.dry_run and not self.vps_host:
-            return "INPUT_RTC_VPS_HOST is required (unless dry-run is enabled)"
+        if not self.dry_run and not (self.rtc_api_url or self.vps_host):
+            return "INPUT_RTC_API_URL or INPUT_RTC_VPS_HOST is required (unless dry-run is enabled)"
         if not self.dry_run and not self.admin_key:
             return "INPUT_RTC_ADMIN_KEY is required (unless dry-run is enabled)"
+        if not _is_finite_amount(self.rtc_amount):
+            return f"rtc-amount must be finite, got {self.rtc_amount}"
+        if not _is_finite_amount(self.max_amount):
+            return f"max-amount must be finite, got {self.max_amount}"
         if self.rtc_amount <= 0:
             return f"rtc-amount must be positive, got {self.rtc_amount}"
+        if self.max_amount <= 0:
+            return f"max-amount must be positive, got {self.max_amount}"
         return None
 
 
@@ -246,10 +280,19 @@ def check_already_awarded(comments: list) -> bool:
         if marker_end != -1:
             marker_tail = marker_tail[:marker_end]
 
-        if "(dry-run)" in marker_tail or ":failed" in marker_tail:
+        if (
+            "(dry-run)" in marker_tail
+            or ":failed" in marker_tail
+        ):
             continue
         return True
     return False
+
+
+def is_endpoint_unreachable_error(error_msg: str) -> bool:
+    """Return True when transfer failed because the RustChain endpoint was unreachable."""
+    normalized = (error_msg or "").lower()
+    return any(pattern in normalized for pattern in _ENDPOINT_UNREACHABLE_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +301,7 @@ def check_already_awarded(comments: list) -> bool:
 
 
 def transfer_rtc(
-    vps_host: str,
+    transfer_url: str,
     admin_key: str,
     from_wallet: str,
     to_wallet: str,
@@ -270,7 +313,11 @@ def transfer_rtc(
 
     Returns ``(success, response_body_dict)``.
     """
-    url = f"http://{vps_host}:{VPS_PORT}/wallet/transfer"
+    transfer_url = build_transfer_url(transfer_url)
+    admin_key = admin_key.strip()
+    from_wallet = from_wallet.strip()
+    to_wallet = to_wallet.strip()
+
     payload = {
         "from_miner": from_wallet,
         "to_miner": to_wallet,
@@ -278,7 +325,7 @@ def transfer_rtc(
         "memo": memo,
     }
     req = Request(
-        url,
+        transfer_url,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -299,6 +346,22 @@ def transfer_rtc(
         return False, result
     except URLError as e:
         return False, {"error": f"Connection failed: {e.reason}"}
+
+
+def build_transfer_url(value: str) -> str:
+    """
+    Build the wallet transfer URL.
+
+    Full URLs are used as-is, except a bare origin gets ``/wallet/transfer``
+    appended. Bare hosts keep the legacy ``http://host:8099`` behavior.
+    """
+    value = value.strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        if parsed.path and parsed.path != "/":
+            return value
+        return f"{value}/wallet/transfer"
+    return f"http://{value}:{VPS_PORT}/wallet/transfer"
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +442,7 @@ def main() -> int:
     bounty_match = _BOUNTY_RE.search(cfg.pr_body)
     if bounty_match:
         override = float(bounty_match.group(1))
-        if 0 < override <= cfg.max_amount:
+        if _is_finite_amount(override) and 0 < override <= cfg.max_amount:
             amount = override
             print(f"Bounty override in PR body: {amount} RTC")
         else:
@@ -426,7 +489,7 @@ def main() -> int:
     # --- Execute transfer --------------------------------------------------
     print(f"Initiating transfer: {amount} RTC from {cfg.from_wallet} to {wallet}")
     ok, result = transfer_rtc(
-        cfg.vps_host,
+        cfg.rtc_api_url or cfg.vps_host,
         cfg.admin_key,
         cfg.from_wallet,
         wallet,
@@ -442,6 +505,31 @@ def main() -> int:
         log_error(f"Transfer failed: {error_msg}")
         set_output("awarded", "false")
         set_output("skip_reason", f"transfer_failed: {error_msg}")
+
+        if is_endpoint_unreachable_error(error_msg):
+            if cfg.post_comment:
+                manual_body = (
+                    f"**RTC Auto-Bounty Manual Transfer Required**\n\n"
+                    f"The merged PR qualifies for an RTC award, but the RustChain "
+                    f"transfer endpoint was unreachable when the workflow ran:\n\n"
+                    f"```\n{error_msg}\n```\n\n"
+                    f"| Field | Value |\n"
+                    f"|-------|-------|\n"
+                    f"| Amount | **{amount} RTC** |\n"
+                    f"| Recipient | `{wallet}` |\n"
+                    f"| From | `{cfg.from_wallet}` |\n"
+                    f"| Memo | {memo} |\n\n"
+                    f"Please rerun the award after the endpoint is healthy or process "
+                    f"this transfer manually. This marker intentionally blocks automatic "
+                    f"retries to avoid duplicate payouts; remove it only if no manual "
+                    f"transfer was completed.\n\n"
+                    f"<!-- { _AWARD_MARKER }:MANUAL-REQUIRED -->"
+                )
+                if not post_pr_comment(repo, pr_number, manual_body, cfg.github_token):
+                    log_error("Manual transfer notice could not be posted.")
+                    set_output("skip_reason", f"manual_notice_failed: {error_msg}")
+                    return 1
+            return 0
 
         if cfg.post_comment:
             fail_body = (

@@ -54,6 +54,30 @@ def _run_migration(db_path):
     conn.close()
 
 
+def _json_object_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "JSON object body is required"}), 400)
+    return data, None
+
+
+def _json_string_field(data, field_name, default=""):
+    value = data.get(field_name, default)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value.strip()
+
+
+def _is_base_address(value: str) -> bool:
+    return (
+        value.startswith("0x")
+        and len(value) == 42
+        and all(char in "0123456789abcdefABCDEF" for char in value[2:])
+    )
+
+
 def init_app(app, db_path):
     """Register x402 routes on the RustChain Flask app."""
 
@@ -77,13 +101,18 @@ def init_app(app, db_path):
         if not hmac.compare_digest(admin_key, expected):
             return jsonify({"error": "Unauthorized — admin key required"}), 401
 
-        data = request.get_json(silent=True) or {}
-        miner_id = data.get("miner_id", "").strip()
-        coinbase_address = data.get("coinbase_address", "").strip()
+        data, error_response = _json_object_body()
+        if error_response:
+            return error_response
+        try:
+            miner_id = _json_string_field(data, "miner_id")
+            coinbase_address = _json_string_field(data, "coinbase_address")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         if not miner_id:
             return jsonify({"error": "miner_id is required"}), 400
-        if not coinbase_address or not coinbase_address.startswith("0x") or len(coinbase_address) != 42:
+        if not coinbase_address or not _is_base_address(coinbase_address):
             return jsonify({"error": "Invalid Base address (must be 0x + 40 hex chars)"}), 400
 
         conn = sqlite3.connect(db_path)

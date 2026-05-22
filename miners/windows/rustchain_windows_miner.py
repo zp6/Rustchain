@@ -114,6 +114,7 @@ class RustChainMiner:
         self.enrolled = False
         self.hw_info = self._get_hw_info()
         self.last_entropy = {}
+        self.last_attestation_error = ""
 
         # Zephyr dual-mining state — detected once per attest() cycle
         self._pow_proof = None
@@ -254,6 +255,7 @@ class RustChainMiner:
                     time.sleep(10)
                     continue
 
+                self._emit_ready_status(callback)
                 eligible = self.check_eligibility()
                 if eligible:
                     header = self.generate_header()
@@ -281,16 +283,44 @@ class RustChainMiner:
         if now >= self.attestation_valid_until - 60:
             if not self.attest():
                 if callback:
-                    callback({"type": "error", "message": "Attestation failed"})
+                    message = "Attestation failed"
+                    if self.last_attestation_error:
+                        message = f"{message}: {self.last_attestation_error}"
+                    callback({"type": "error", "message": message})
                 return False
+            if callback:
+                callback({
+                    "type": "attest",
+                    "message": "Attestation submitted",
+                    "miner_id": self.miner_id,
+                    "attestation_ttl_seconds": max(0, int(self.attestation_valid_until - time.time())),
+                })
 
         if (now - self.last_enroll) > 3600 or not self.enrolled:
             if not self.enroll():
                 if callback:
                     callback({"type": "error", "message": "Epoch enrollment failed"})
                 return False
+            if callback:
+                callback({
+                    "type": "enroll",
+                    "message": "Epoch enrollment succeeded",
+                    "miner_id": self.miner_id,
+                    "last_enroll": int(self.last_enroll),
+                })
 
         return True
+
+    def _emit_ready_status(self, callback):
+        if not callback:
+            return
+        callback({
+            "type": "status",
+            "message": "Miner ready",
+            "miner_id": self.miner_id,
+            "enrolled": self.enrolled,
+            "attestation_ttl_seconds": max(0, int(self.attestation_valid_until - time.time())),
+        })
 
     def _get_mac_addresses(self):
         macs = set()
@@ -362,11 +392,23 @@ class RustChainMiner:
         apply the PoW bonus multiplier to this miner's RTC rewards.
         """
         try:
-            challenge = requests.post(
+            challenge_resp = requests.post(
                 f"{self.node_url}/attest/challenge", json={}, timeout=10
-            ).json()
-            nonce = challenge.get("nonce")
-        except Exception:
+            )
+            if challenge_resp.status_code != 200:
+                self.last_attestation_error = (
+                    f"challenge rejected: {self._response_diagnostic(challenge_resp)}"
+                )
+                return False
+            challenge = challenge_resp.json()
+            nonce = challenge.get("nonce") if isinstance(challenge, dict) else None
+            if not nonce:
+                self.last_attestation_error = (
+                    f"challenge rejected: {self._response_diagnostic(challenge_resp)}"
+                )
+                return False
+        except Exception as e:
+            self.last_attestation_error = f"challenge request failed: {e}"
             return False
 
         entropy = self._collect_entropy()
@@ -412,10 +454,32 @@ class RustChainMiner:
             )
             if resp.status_code == 200 and resp.json().get("ok"):
                 self.attestation_valid_until = time.time() + 580
+                self.last_attestation_error = ""
                 return True
-        except Exception:
-            pass
+            self.last_attestation_error = f"submit rejected: {self._response_diagnostic(resp)}"
+        except Exception as e:
+            self.last_attestation_error = f"submit request failed: {e}"
         return False
+
+    def _response_diagnostic(self, resp):
+        """Return a compact HTTP failure description for operator logs."""
+        parts = [f"HTTP {getattr(resp, 'status_code', 'unknown')}"]
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            for key in ("code", "error", "message"):
+                value = payload.get(key)
+                if value:
+                    parts.append(f"{key}={value}")
+        else:
+            text = (getattr(resp, "text", "") or "").strip()
+            if text:
+                parts.append(f"body={text[:240]}")
+
+        return " ".join(parts)
 
     def enroll(self):
         """Enroll the miner into the current epoch after attesting."""
@@ -579,25 +643,49 @@ class RustChainGUI:
         self.root.mainloop()
 
 
+def _format_headless_event(evt):
+    t = evt.get("type")
+    if t == "share":
+        ok = "OK" if evt.get("success") else "FAIL"
+        return (
+            f"[share] submitted={evt.get('submitted')} "
+            f"accepted={evt.get('accepted')} {ok}"
+        )
+    if t == "attest":
+        return (
+            f"[attest] {evt.get('message')} "
+            f"miner_id={evt.get('miner_id')} "
+            f"ttl={evt.get('attestation_ttl_seconds')}s"
+        )
+    if t == "enroll":
+        return f"[enroll] {evt.get('message')} miner_id={evt.get('miner_id')}"
+    if t == "status":
+        enrolled = "yes" if evt.get("enrolled") else "no"
+        return (
+            f"[status] {evt.get('message')} "
+            f"miner_id={evt.get('miner_id')} "
+            f"enrolled={enrolled} "
+            f"attest_ttl={evt.get('attestation_ttl_seconds')}s"
+        )
+    if t == "error":
+        return f"[error] {evt.get('message')}"
+    return None
+
+
 def run_headless(wallet_address: str, node_url: str) -> int:
     wallet = RustChainWallet()
-    if wallet_address:
-        wallet.wallet_data["address"] = wallet_address
-        wallet.save_wallet(wallet.wallet_data)
-    miner = RustChainMiner(wallet.wallet_data["address"])
+    active_wallet = wallet_address or wallet.wallet_data["address"]
+    miner = RustChainMiner(active_wallet)
     miner.node_url = node_url
 
     def cb(evt):
-        t = evt.get("type")
-        if t == "share":
-            ok = "OK" if evt.get("success") else "FAIL"
-            print(
-                f"[share] submitted={evt.get('submitted')} "
-                f"accepted={evt.get('accepted')} {ok}",
-                flush=True
-            )
-        elif t == "error":
-            print(f"[error] {evt.get('message')}", file=sys.stderr, flush=True)
+        line = _format_headless_event(evt)
+        if not line:
+            return
+        if evt.get("type") == "error":
+            print(line, file=sys.stderr, flush=True)
+        else:
+            print(line, flush=True)
 
     print("RustChain Windows miner: headless mode", flush=True)
     print(f"node={miner.node_url} miner_id={miner.miner_id}", flush=True)
@@ -634,8 +722,6 @@ def main(argv=None):
     app = RustChainGUI()
     app.miner.node_url = args.node
     if args.wallet:
-        app.wallet.wallet_data["address"] = args.wallet
-        app.wallet.save_wallet(app.wallet.wallet_data)
         app.miner.wallet_address = args.wallet
         app.miner.miner_id = f"windows_{hashlib.md5(args.wallet.encode()).hexdigest()[:8]}"
     app.run()

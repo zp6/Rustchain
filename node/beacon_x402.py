@@ -28,7 +28,7 @@ try:
     )
     X402_CONFIG_OK = True
 except ImportError:
-    log.warning("x402_config not found — x402 features disabled")
+    log.warning("x402_config not found ? x402 features disabled")
     X402_CONFIG_OK = False
 
 
@@ -95,6 +95,42 @@ def _cors_json(data, status=200):
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-PAYMENT"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, OPTIONS"
     return resp, status
+
+
+def _json_object_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, _cors_json({"error": "JSON object body is required"}, 400)
+    return data, None
+
+
+def _json_string_field(data, field_name, default=""):
+    value = data.get(field_name, default)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value.strip()
+
+
+def _is_base_address(value: str) -> bool:
+    return (
+        value.startswith("0x")
+        and len(value) == 42
+        and all(char in "0123456789abcdefABCDEF" for char in value[2:])
+    )
+
+
+def _require_beacon_admin():
+    expected = os.environ.get("BEACON_ADMIN_KEY", "")
+    if not expected:
+        return _cors_json({"error": "Admin key not configured"}, 503)
+
+    admin_key = request.headers.get("X-Admin-Key", "")
+    if not hmac.compare_digest(admin_key, expected):
+        return _cors_json({"error": "Unauthorized - admin key required"}, 401)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +202,7 @@ def init_app(app, get_db_func):
         log.error(f"Beacon x402 migration failed: {e}")
 
     # ---------------------------------------------------------------
-    # Wallet Management — Native Agents
+    # Wallet Management ? Native Agents
     # ---------------------------------------------------------------
 
     @app.route("/api/agents/<agent_id>/wallet", methods=["POST", "OPTIONS"])
@@ -175,17 +211,19 @@ def init_app(app, get_db_func):
         if request.method == "OPTIONS":
             return _cors_json({"ok": True})
 
-        # Simple admin check — require admin key in header
-        admin_key = request.headers.get("X-Admin-Key", "")
-        expected = os.environ.get("BEACON_ADMIN_KEY", "")
-        if not expected:
-            return _cors_json({"error": "Admin key not configured"}, 503)
-        if not hmac.compare_digest(admin_key, expected):
-            return _cors_json({"error": "Unauthorized — admin key required"}, 401)
+        # Simple admin check ? require admin key in header
+        admin_error = _require_beacon_admin()
+        if admin_error:
+            return admin_error
 
-        data = request.get_json(silent=True) or {}
-        address = data.get("coinbase_address", "").strip()
-        if not address or not address.startswith("0x") or len(address) != 42:
+        data, error_response = _json_object_body()
+        if error_response:
+            return error_response
+        try:
+            address = _json_string_field(data, "coinbase_address")
+        except ValueError as exc:
+            return _cors_json({"error": str(exc)}, 400)
+        if not address or not _is_base_address(address):
             return _cors_json({"error": "Invalid Base address"}, 400)
 
         db = get_db_func()
@@ -233,7 +271,7 @@ def init_app(app, get_db_func):
                 "SELECT coinbase_address FROM relay_agents WHERE agent_id = ?",
                 (agent_id,),
             ).fetchone()
-            if relay and relay.get("coinbase_address"):
+            if relay and relay["coinbase_address"]:
                 return _cors_json({
                     "agent_id": agent_id,
                     "coinbase_address": relay["coinbase_address"],
@@ -296,9 +334,12 @@ def init_app(app, get_db_func):
             return err_resp
 
         db = get_db_func()
-        rows = db.execute(
-            "SELECT * FROM contracts ORDER BY created_at DESC"
-        ).fetchall()
+        try:
+            rows = db.execute(
+                "SELECT * FROM contracts ORDER BY created_at DESC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
 
         contracts = []
         for r in rows:
@@ -328,6 +369,10 @@ def init_app(app, get_db_func):
         """View x402 payment history for beacon."""
         if request.method == "OPTIONS":
             return _cors_json({"ok": True})
+
+        admin_error = _require_beacon_admin()
+        if admin_error:
+            return admin_error
 
         db = get_db_func()
         try:

@@ -173,9 +173,21 @@ class ReputationEngine:
             # Try via API /api/miners
             miners_data = self._fetch("/api/miners")
             if miners_data:
-                miners = miners_data if isinstance(miners_data, list) else miners_data.get("miners", [])
+                miners = miners_data if isinstance(miners_data, list) else []
+                if isinstance(miners_data, dict):
+                    for key in ("miners", "data", "items"):
+                        rows = miners_data.get(key)
+                        if isinstance(rows, list):
+                            miners = rows
+                            break
                 for m in miners:
-                    if m.get("wallet_name") == wallet or m.get("wallet") == wallet:
+                    miner_id = (
+                        m.get("wallet_name")
+                        or m.get("wallet")
+                        or m.get("miner")
+                        or m.get("miner_id")
+                    )
+                    if miner_id == wallet:
                         hardware_verified = True
                         break
 
@@ -285,17 +297,23 @@ class ReputationEngine:
             else:
                 self._cache.clear()
 
+    def _refresh_stale_cache_entries(self):
+        now = time.time()
+        with self._lock:
+            stale = [
+                w for w, (_, ts) in self._cache.items()
+                if now - ts > CACHE_TTL_S
+            ]
+        for w in stale:
+            refreshed = self.calculate(w)
+            with self._lock:
+                if w in self._cache:
+                    self._cache[w] = (refreshed, time.time())
+
     def _refresh_loop(self):
         while True:
             time.sleep(CACHE_TTL_S)
-            with self._lock:
-                stale = [w for w, (_, ts) in self._cache.items()
-                         if time.time() - ts > CACHE_TTL_S]
-            for w in stale:
-                self.calculate(w)
-                with self._lock:
-                    if w in self._cache:
-                        self._cache[w] = (self._cache[w][0], time.time())
+            self._refresh_stale_cache_entries()
 
     def start_cache_refresh(self):
         t = threading.Thread(target=self._refresh_loop, daemon=True)
@@ -335,19 +353,26 @@ def check_eligibility():
         return jsonify({"error": "agent_id required"}), 400
 
     try:
-        job_value = float(request.args.get("job_value", 0))
+        raw_job_value = request.args.get("job_value")
+        job_value = float(raw_job_value) if raw_job_value not in (None, "") else 0
     except (ValueError, TypeError):
         return jsonify({"error": "job_value must be a number"}), 400
+    if not math.isfinite(job_value) or job_value < 0:
+        return jsonify({"error": "job_value must be a finite non-negative number"}), 400
 
     rep = _engine.get(agent_id)
     max_val = rep["max_job_value_rtc"]
     level = rep["level"]
     eligible = job_value <= max_val
+    reason = None
 
     # High-value job gate: jobs above HIGH_VALUE_THRESHOLD require veteran level
     if eligible and job_value > HIGH_VALUE_THRESHOLD:
         if level not in CAN_POST_HIGH_VALUE:
             eligible = False
+            reason = f"{level} level agents cannot claim high-value jobs (>{HIGH_VALUE_THRESHOLD} RTC)"
+    elif not eligible:
+        reason = f"{level} level agents can only claim jobs up to {max_val:g} RTC"
 
     return jsonify({
         "agent_id": agent_id,
@@ -357,7 +382,7 @@ def check_eligibility():
         "level": level,
         "can_post_high_value": level in CAN_POST_HIGH_VALUE,
         "max_job_value_rtc": max_val,
-        "reason": None if eligible else f"{level} level agents cannot claim high-value jobs (>{HIGH_VALUE_THRESHOLD} RTC)",
+        "reason": reason,
     })
 
 
@@ -368,9 +393,12 @@ def leaderboard():
     Returns top agents by reputation (from cache).
     """
     try:
-        limit = min(int(request.args.get("limit", 20)), 100)
+        raw_limit = request.args.get("limit")
+        limit = min(int(raw_limit), 100) if raw_limit not in (None, "") else 20
     except (ValueError, TypeError):
         return jsonify({"error": "limit must be an integer"}), 400
+    if limit < 1:
+        return jsonify({"error": "limit must be between 1 and 100"}), 400
     with _engine._lock:
         entries = [(w, d["reputation_score"]) for w, (d, _) in _engine._cache.items()]
     entries.sort(key=lambda x: x[1], reverse=True)
@@ -403,7 +431,7 @@ if __name__ == "__main__":
     print(f"  Level:          {result['level'].upper()} — {result['level_description']}")
     print(f"  Max Job Value:  {result['max_job_value_rtc']} RTC")
     print(f"  Can Post Jobs:  {'✓' if result['can_post_jobs'] else '✗'}")
-    print(f"")
+    print("")
     print(f"  Jobs Completed: {result['jobs_completed']}")
     print(f"  Jobs Accepted:  {result['jobs_accepted']}")
     print(f"  Jobs Disputed:  {result['jobs_disputed']}")

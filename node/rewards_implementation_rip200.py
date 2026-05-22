@@ -231,11 +231,19 @@ def settle_epoch_rip200(db_path, epoch: int, enable_anti_double_mining: bool = T
                 "device_arch": device_arch
             })
 
-        # Mark epoch as settled
-        db.execute(
-            "INSERT OR REPLACE INTO epoch_state (epoch, settled, settled_ts) VALUES (?, 1, ?)",
-            (epoch, ts_now)
-        )
+        # Mark epoch as settled without replacing the whole row.
+        # INSERT OR REPLACE deletes any existing epoch_state metadata columns
+        # (for example finalized/accepted_blocks/pot) before inserting the
+        # narrow settlement row. Preserve unrelated epoch state fields.
+        updated = db.execute(
+            "UPDATE epoch_state SET settled = 1, settled_ts = ? WHERE epoch = ?",
+            (ts_now, epoch)
+        ).rowcount
+        if updated == 0:
+            db.execute(
+                "INSERT INTO epoch_state (epoch, settled, settled_ts) VALUES (?, 1, ?)",
+                (epoch, ts_now)
+            )
 
         db.commit()
 
@@ -280,7 +288,11 @@ def register_rewards_rip200(app, DB_PATH):
         if not hmac.compare_digest(provided_key, settle_key):
             return jsonify({"error": "Unauthorized — valid X-Admin-Key header required"}), 401
 
-        data = request.json or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "JSON object required"}), 400
         epoch = data.get('epoch')
 
         if epoch is None:
@@ -288,6 +300,10 @@ def register_rewards_rip200(app, DB_PATH):
             current = current_slot()
             current_epoch = slot_to_epoch(current)
             epoch = current_epoch - 1
+        elif isinstance(epoch, bool) or not isinstance(epoch, int):
+            return jsonify({"error": "epoch must be an integer"}), 400
+        elif epoch < 0:
+            return jsonify({"error": "epoch must be non-negative"}), 400
 
         result = settle_epoch_rip200(DB_PATH, epoch)
         return jsonify(result)

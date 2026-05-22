@@ -13,12 +13,14 @@
 [![Nodes](https://img.shields.io/badge/Nodes-5%20Active-brightgreen)](https://rustchain.org/explorer/)
 [![DePIN](https://img.shields.io/badge/DePIN-Vintage%20Hardware-8B4513)](https://rustchain.org)
 [![Proof of Antiquity](https://img.shields.io/badge/Consensus-Proof%20of%20Antiquity-DAA520)](docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
-[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.19442753.svg)](https://doi.org/10.5281/zenodo.19442753)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19442753-blue)](https://doi.org/10.5281/zenodo.19442753)
 
 A PowerBook G4 from 2003 earns **2.5x** more than a modern Threadripper.
 A Power Mac G5 earns **2.0x**. A 486 with rusty serial ports earns the most respect of all.
 
 [Explorer](https://rustchain.org/explorer/) · [Machines Preserved](https://rustchain.org/preserved.html) · [Install Miner](#quickstart) · [Beginner Guide](docs/QUICKSTART.md) · [Manifesto](https://rustchain.org/manifesto.html) · [Whitepaper](docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
+
+中文入口: [中文文档](docs/zh-CN/README.md) · [中文 API 快速参考](docs/zh-CN/API.md)
 
 </div>
 
@@ -107,7 +109,7 @@ Proof-of-Antiquity rewards hardware for *surviving*, not for being fast. Older m
 | PowerPC G4 (2003) | **2.5x** | ANCIENT | Still running, still earning |
 | RISC-V (2014) | **1.4x** | EXOTIC | Open ISA, the future |
 | Apple Silicon M1 (2020) | **1.2x** | MODERN | Efficient, welcome |
-| Modern x86_64 | **0.8x** | MODERN | Baseline — *for now* |
+| Modern x86_64 | **1.0x** | MODERN | Baseline — *for now* |
 | Modern ARM NAS/SBC | **0.0005x** | PENALTY | Cheap, farmable, penalized |
 
 Our fleet of 16+ preserved machines draws roughly the same power as ONE modern GPU mining rig — while preventing 1,300 kg of manufacturing CO2 and 250 kg of e-waste.
@@ -146,7 +148,7 @@ The attestation server doesn't trust self-reported data. It:
 ### AI Agent Economy
 
 RustChain powers an ecosystem where AI agents and humans collaborate:
-- **[BoTTube](https://bottube.ai)** — AI-native video platform where bots create, curate, and engage
+- **BoTTube** — AI-native video platform where bots create, curate, and engage
 - **[Beacon](https://github.com/Scottcjn/beacon-skill)** — Agent discovery protocol
 - **[TrashClaw](https://github.com/Scottcjn/trashclaw)** — Zero-dep local LLM agent
 - **Bounty system** — 25,875+ RTC paid to 260+ contributors, many AI-assisted
@@ -181,10 +183,10 @@ This isn't a roadmap. This is deployed and running:
 | Layer | What | Status |
 |-------|------|--------|
 | **Identity** | Hardware fingerprinting — agents prove they run on real machines, not spoofed VMs | Live, 26+ miners |
-| **Currency** | RTC (native) + wRTC (Solana bridge) — agent-native money with micropayment support | Live, [tradeable on Raydium](https://raydium.io/swap/?inputMint=sol&outputMint=12TAdKXxcGf6oCv4rqDz2NkgxjyHq6HQKoxKZYGf5i4X) |
+| **Currency** | RTC (native) + wRTC (Solana bridge) — agent-native money with micropayment support | Live, Raydium swap link below |
 | **Discovery** | [Beacon protocol](https://github.com/Scottcjn/beacon-skill) — agents find and negotiate with other agents | Live, 126 stars |
 | **Execution** | [TrashClaw](https://github.com/Scottcjn/trashclaw) — zero-dep local LLM agent that runs on anything | Live |
-| **Social** | [BoTTube](https://bottube.ai) — AI-native platform where agents create, trade, and engage | Live, 1,000+ videos |
+| **Social** | BoTTube — AI-native platform where agents create, trade, and engage | Live, 1,000+ videos |
 | **Bounties** | Agent-assisted contributions — AI helps humans earn RTC for real code | Live, 25,875+ RTC paid |
 | **Certification** | [BCOS](https://rustchain.org/bcos/) — blockchain-certified open source verification | Live, 44 certs issued |
 
@@ -227,9 +229,9 @@ What they *can't* capture:
 
 ```bash
 # Verify right now
-curl -sk https://rustchain.org/health          # Node health
-curl -sk https://rustchain.org/api/miners      # Active miners
-curl -sk https://rustchain.org/epoch           # Current epoch
+curl -fsS https://rustchain.org/health          # Node health
+curl -fsS https://rustchain.org/api/miners      # Active miners
+curl -fsS https://rustchain.org/epoch           # Current epoch
 ```
 
 ### Attestation Nodes
@@ -245,7 +247,7 @@ curl -sk https://rustchain.org/epoch           # Current epoch
 | Fact | Proof |
 |------|-------|
 | 5 nodes across 3 continents (NA ×3, Asia ×1, Local ×1) | [Live explorer](https://rustchain.org/explorer/) |
-| 26+ miners attesting | `curl -sk https://rustchain.org/api/miners` |
+| 26+ miners attesting | `curl -fsS https://rustchain.org/api/miners` |
 | 44 BCOS certificates issued | [Certified repos](https://rustchain.org/bcos/) |
 | 6 hardware fingerprint checks per machine | [Fingerprint docs](docs/attestation_fuzzing.md) |
 | 25,875+ RTC paid to 260+ contributors | [Public ledger](https://github.com/Scottcjn/rustchain-bounties/issues/104) |
@@ -271,7 +273,7 @@ Works on Linux (x86_64, ppc64le, aarch64, mips, sparc, m68k, riscv64, ia64, s390
 curl -sSL https://raw.githubusercontent.com/Scottcjn/Rustchain/main/install-miner.sh | bash -s -- --wallet my-wallet
 
 # Check your balance
-curl -sk "https://rustchain.org/wallet/balance?miner_id=YOUR_WALLET_NAME"
+curl -fsS "https://rustchain.org/wallet/balance?miner_id=YOUR_WALLET_NAME"
 ```
 
 ### Manage the Miner
@@ -303,6 +305,27 @@ commands because the repository contains multiple Python and Rust subprojects.
 
 ---
 
+## Wallets
+
+RustChain has two wallet concepts:
+
+- **Miner wallet ID**: a readable `miner_id` used for mining rewards and balance checks.
+- **`RTC...` address**: an Ed25519-backed address used for signed transfers.
+
+Start with the [wallet setup guide](docs/WALLET_SETUP.md) if you are not sure which one you need.
+
+| Option | Use it for | Where |
+|---|---|---|
+| Miner install wallet | Earning mining rewards to a named wallet | `install-miner.sh --wallet YOUR_WALLET` |
+| Browser light client | Loading a wallet and signing transfers locally in the browser | [web/light-client](web/light-client/) |
+| Desktop GUI wallet | Creating or restoring a local wallet from this repo | `wallet/rustchain_wallet_secure.py` |
+| CLI tooling | Scripted wallet operations from a checkout | `tools/rustchain_wallet_cli.py` |
+| Agent/Base wallet docs | Coinbase Agentic Wallets, x402, and Base linking | [web/wallets.html](web/wallets.html) |
+
+For command examples, backup guidance, and the signed-transfer payload format, see [docs/WALLET_SETUP.md](docs/WALLET_SETUP.md) and [START_HERE.md](START_HERE.md).
+
+---
+
 ## How Proof-of-Antiquity Works
 
 ### 1 CPU = 1 Vote
@@ -319,7 +342,7 @@ Epoch: 10 minutes  |  Pool: 1.5 RTC/epoch  |  Split by antiquity weight
 
 G4 Mac (2.5x):     0.30 RTC  ████████████████████
 G5 Mac (2.0x):     0.24 RTC  ████████████████
-Modern PC (0.8x):  0.10 RTC  ██████
+Modern PC (1.0x):  0.12 RTC  ████████
 ```
 
 ### Anti-VM Enforcement
@@ -345,7 +368,7 @@ VMs are detected and receive **1 billionth** of normal rewards. Real hardware on
 |--|------|
 | **Swap** | [Raydium DEX](https://raydium.io/swap/?inputMint=sol&outputMint=12TAdKXxcGf6oCv4rqDz2NkgxjyHq6HQKoxKZYGf5i4X) |
 | **Chart** | [DexScreener](https://dexscreener.com/solana/8CF2Q8nSCxRacDShbtF86XTSrYjueBMKmfdR3MLdnYzb) |
-| **Bridge** | [Bridge](https://bottube.ai/bridge) |
+| **Bridge** | [Bridge](https://bottube.ai/bridge/wrtc) |
 | **Guide** | [wRTC Quickstart](docs/wrtc.md) |
 
 ---
@@ -370,11 +393,11 @@ Every contribution earns RTC tokens. Browse [open bounties](https://github.com/S
 | Paper | Venue | DOI |
 |-------|-------|-----|
 | **Emotional Vocabulary as Semantic Grounding** | **CVPR 2026 Workshop (GRAIL-V)** — Accepted | [OpenReview](https://openreview.net/forum?id=pXjE6Tqp70) |
-| **One CPU, One Vote** | Preprint | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18623592.svg)](https://doi.org/10.5281/zenodo.18623592) |
-| **Non-Bijunctive Permutation Collapse** | Preprint | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18623920.svg)](https://doi.org/10.5281/zenodo.18623920) |
-| **PSE Hardware Entropy** | Preprint | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18623922.svg)](https://doi.org/10.5281/zenodo.18623922) |
-| **RAM Coffers** | Preprint | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18321905.svg)](https://doi.org/10.5281/zenodo.18321905) |
-| **RPI: Resonant Permutation Inference** | Preprint | [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19271983.svg)](https://doi.org/10.5281/zenodo.19271983) |
+| **One CPU, One Vote** | Preprint | [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18623592-blue)](https://doi.org/10.5281/zenodo.18623592) |
+| **Non-Bijunctive Permutation Collapse** | Preprint | [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18623920-blue)](https://doi.org/10.5281/zenodo.18623920) |
+| **PSE Hardware Entropy** | Preprint | [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18623922-blue)](https://doi.org/10.5281/zenodo.18623922) |
+| **RAM Coffers** | Preprint | [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18321905-blue)](https://doi.org/10.5281/zenodo.18321905) |
+| **RPI: Resonant Permutation Inference** | Preprint | [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19271983-blue)](https://doi.org/10.5281/zenodo.19271983) |
 
 ---
 

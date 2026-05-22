@@ -14,14 +14,14 @@ import time
 import hashlib
 import secrets
 import base64
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict, field
 from enum import Enum
 import threading
 import logging
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request
 import nacl.signing
 import nacl.encoding
 
@@ -968,6 +968,42 @@ mcp = MCPIntegration(reservation_manager)
 beacon = BeaconIntegration(reservation_manager)
 
 
+def _json_object_body():
+    data = request.get_json(silent=True)
+    if data is None:
+        if request.get_data(cache=True):
+            return None, (jsonify({"error": "JSON object required"}), 400)
+        return None, (jsonify({"error": "Request body required"}), 400)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "JSON object required"}), 400)
+    return data, None
+
+
+def _positive_limit(default: int = 10):
+    raw = request.args.get('limit', str(default))
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "limit must be an integer"}), 400)
+    if limit < 1:
+        return None, (jsonify({"error": "limit must be positive"}), 400)
+    return limit, None
+
+
+def _required_string_field(data: Dict, field_name: str):
+    value = data.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        return None, (jsonify({"error": f"{field_name} must be a non-empty string"}), 400)
+    return value.strip(), None
+
+
+def _positive_number_field(data: Dict, field_name: str):
+    value = data.get(field_name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None, (jsonify({"error": f"{field_name} must be a positive number"}), 400)
+    return value, None
+
+
 # ============== API Endpoints ==============
 
 @app.route('/health', methods=['GET'])
@@ -1013,17 +1049,29 @@ def get_machine_details(machine_id: str):
 @app.route('/relic/reserve', methods=['POST'])
 def reserve_machine():
     """POST /relic/reserve - Reserve a machine"""
-    data = request.get_json()
+    data, error = _json_object_body()
+    if error:
+        return error
     
     required = ["machine_id", "agent_id", "duration_hours", "payment_rtc"]
     if not all(k in data for k in required):
         return jsonify({"error": "Missing required fields", "required": required}), 400
+
+    machine_id, error = _required_string_field(data, "machine_id")
+    if error:
+        return error
+    agent_id, error = _required_string_field(data, "agent_id")
+    if error:
+        return error
+    payment_rtc, error = _positive_number_field(data, "payment_rtc")
+    if error:
+        return error
     
     reservation, error = reservation_manager.create_reservation(
-        machine_id=data["machine_id"],
-        agent_id=data["agent_id"],
+        machine_id=machine_id,
+        agent_id=agent_id,
         duration_hours=data["duration_hours"],
-        payment_rtc=data["payment_rtc"]
+        payment_rtc=payment_rtc
     )
     
     if error:
@@ -1068,7 +1116,9 @@ def start_reservation_session(reservation_id: str):
 @app.route('/relic/reservation/<reservation_id>/complete', methods=['POST'])
 def complete_reservation_session(reservation_id: str):
     """Complete session and get provenance receipt"""
-    data = request.get_json()
+    data, error = _json_object_body()
+    if error:
+        return error
     
     required = ["compute_hash", "hardware_attestation"]
     if not all(k in data for k in required):
@@ -1113,7 +1163,9 @@ def get_receipt(session_id: str):
 @app.route('/relic/leaderboard', methods=['GET'])
 def get_leaderboard():
     """Get most-rented machines leaderboard"""
-    limit = int(request.args.get('limit', '10'))
+    limit, error = _positive_limit()
+    if error:
+        return error
     leaderboard = reservation_manager.get_most_rented_machines(limit)
     
     machines_data = []
@@ -1156,7 +1208,9 @@ def get_mcp_manifest():
 @app.route('/mcp/tool', methods=['POST'])
 def call_mcp_tool():
     """Call an MCP tool"""
-    data = request.get_json()
+    data, error = _json_object_body()
+    if error:
+        return error
     
     tool_name = data.get("tool")
     arguments = data.get("arguments", {})
@@ -1173,7 +1227,9 @@ def call_mcp_tool():
 @app.route('/beacon/message', methods=['POST'])
 def handle_beacon_message():
     """Handle Beacon protocol message"""
-    data = request.get_json()
+    data, error = _json_object_body()
+    if error:
+        return error
     
     message_type = data.get("type")
     payload = data.get("payload", {})

@@ -159,7 +159,14 @@ class AsyncRustChainClient:
                 - last_attest (int): Last attestation timestamp
         """
         result = await self._request("GET", "/api/miners")
-        return result if isinstance(result, list) else []
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            for key in ("miners", "data", "items"):
+                miners = result.get(key)
+                if isinstance(miners, list):
+                    return miners
+        return []
 
     async def balance(self, miner_id: str) -> Dict[str, Any]:
         """
@@ -181,7 +188,7 @@ class AsyncRustChainClient:
         if not miner_id or not isinstance(miner_id, str):
             raise ValidationError("miner_id must be a non-empty string")
 
-        return await self._request("GET", "/balance", params={"miner_id": miner_id})
+        return await self._request("GET", "/wallet/balance", params={"miner_id": miner_id})
 
     async def transfer(
         self,

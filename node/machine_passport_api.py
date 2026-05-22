@@ -9,11 +9,10 @@ Issue: #2309
 """
 
 import os
-import json
 import time
 import hmac
 from typing import Optional
-from flask import Blueprint, request, jsonify, render_template_string
+from flask import Blueprint, request, jsonify
 
 from machine_passport import (
     MachinePassportLedger,
@@ -80,6 +79,23 @@ def get_optional_json_object():
     return data, None
 
 
+def _parse_non_negative_int_arg(name: str, default: int, max_value: Optional[int] = None):
+    """Parse a non-negative integer query parameter."""
+    raw_value = request.args.get(name, default)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None, jsonify({'ok': False, 'error': f'{name} must be an integer'}), 400
+
+    if value < 0:
+        return None, jsonify({'ok': False, 'error': f'{name} must be non-negative'}), 400
+
+    if max_value is not None:
+        value = min(value, max_value)
+
+    return value, None, None
+
+
 # === Public Read Endpoints ===
 
 @machine_passport_bp.route('/<machine_id>', methods=['GET'])
@@ -121,8 +137,13 @@ def list_passports():
     
     owner = request.args.get('owner')
     architecture = request.args.get('architecture')
-    limit = min(int(request.args.get('limit', 100)), 500)
-    offset = int(request.args.get('offset', 0))
+    limit, error_response, status = _parse_non_negative_int_arg('limit', 100, max_value=500)
+    if error_response is not None:
+        return error_response, status
+
+    offset, error_response, status = _parse_non_negative_int_arg('offset', 0)
+    if error_response is not None:
+        return error_response, status
     
     passports = ledger.list_passports(
         owner_miner_id=owner,
@@ -229,7 +250,9 @@ def create_passport():
     if auth_error is not None:
         return auth_error
     
-    data = request.get_json()
+    data, error = get_optional_json_object()
+    if error:
+        return error
     if not data:
         return jsonify({
             'ok': False,
@@ -317,7 +340,9 @@ def update_passport(machine_id: str):
     if not passport:
         return jsonify({'ok': False, 'error': 'passport_not_found'}), 404
     
-    data = request.get_json()
+    data, error = get_optional_json_object()
+    if error:
+        return error
     if not data:
         return jsonify({
             'ok': False,
@@ -557,7 +582,6 @@ def generate_qr(machine_id: str):
     """
     import tempfile
     import base64
-    from io import BytesIO
     
     ledger = get_ledger()
     passport = ledger.get_passport(machine_id)
@@ -649,7 +673,9 @@ def compute_machine_id_endpoint():
     
     Request Body: Hardware fingerprint data (same as attestation)
     """
-    data = request.get_json()
+    data, error = get_optional_json_object()
+    if error:
+        return error
     if not data:
         return jsonify({
             'ok': False,

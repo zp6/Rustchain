@@ -13,9 +13,11 @@ Admin-controlled Phase 1 (upgrade to trustless lock in Phase 2)
 
 import os
 import json
+import math
 import sqlite3
 import hashlib
 import hmac
+import math
 import time
 import threading
 import uuid
@@ -37,6 +39,10 @@ SUPPORTED_CHAINS = {CHAIN_SOLANA, CHAIN_BASE}
 
 # RTC decimal precision
 RTC_DECIMALS = 6
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("BRIDGE_API_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # Minimum lock amounts
 MIN_LOCK_AMOUNT = 1  # 1 RTC
@@ -132,6 +138,14 @@ def _amount_from_base(amount_int: int) -> float:
     return amount_int / (10 ** RTC_DECIMALS)
 
 
+def _is_base_wallet_address(value: str) -> bool:
+    return (
+        value.startswith("0x")
+        and len(value) == 42
+        and all(char in "0123456789abcdefABCDEF" for char in value[2:])
+    )
+
+
 def _generate_lock_id(sender: str, amount: int, target_chain: str, ts: int) -> str:
     """Deterministic lock ID from key fields."""
     raw = f"{sender}:{amount}:{target_chain}:{ts}:{uuid.uuid4()}"
@@ -172,6 +186,28 @@ def _require_admin(fn):
     return wrapper
 
 
+def _json_object_body():
+    """Return the parsed JSON body only when it is an object."""
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "JSON object body is required"}), 400)
+    return data, None
+
+
+def _clean_string_field(data, field_name, *, optional=False, lower=False):
+    value = data.get(field_name)
+    if value is None:
+        return None if optional else ""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    value = value.strip()
+    if lower:
+        value = value.lower()
+    if optional and not value:
+        return None
+    return value
+
+
 # ─── Blueprint ────────────────────────────────────────────────────────────────
 bridge_bp = Blueprint("bridge", __name__, url_prefix="/bridge")
 
@@ -200,19 +236,28 @@ def lock_rtc():
       - Rejects requests with invalid proof signatures
       - Validates proof before accepting lock into ledger
     """
-    data = request.get_json(force=True, silent=True) or {}
+    data, error_response = _json_object_body()
+    if error_response:
+        return error_response
 
     # ── Validate inputs ──
-    sender = data.get("sender_wallet", "").strip()
-    target_chain = data.get("target_chain", "").lower().strip()
-    target_wallet = data.get("target_wallet", "").strip()
-    tx_hash = data.get("tx_hash", "").strip() or None
-    receipt_signature_raw = data.get("receipt_signature")
-    receipt_signature = receipt_signature_raw.strip().lower() if receipt_signature_raw else None
-
     try:
-        amount_float = float(data.get("amount", 0))
+        sender = _clean_string_field(data, "sender_wallet")
+        target_chain = _clean_string_field(data, "target_chain", lower=True)
+        target_wallet = _clean_string_field(data, "target_wallet")
+        tx_hash = _clean_string_field(data, "tx_hash", optional=True)
+        receipt_signature = _clean_string_field(data, "receipt_signature", optional=True, lower=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    raw_amount = data.get("amount", 0)
+    if isinstance(raw_amount, bool):
+        return jsonify({"error": "invalid amount"}), 400
+    try:
+        amount_float = float(raw_amount)
     except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    if not math.isfinite(amount_float):
         return jsonify({"error": "invalid amount"}), 400
 
     if not sender:
@@ -229,7 +274,7 @@ def lock_rtc():
         return jsonify({"error": f"maximum lock amount is {MAX_LOCK_AMOUNT} RTC"}), 400
 
     # Validate target wallet format
-    if target_chain == CHAIN_BASE and not target_wallet.startswith("0x"):
+    if target_chain == CHAIN_BASE and not _is_base_wallet_address(target_wallet):
         return jsonify({"error": "Base wallet must be a 0x EVM address"}), 400
     if target_chain == CHAIN_SOLANA and len(target_wallet) < 32:
         return jsonify({"error": "Solana wallet must be a valid base58 address"}), 400
@@ -344,10 +389,15 @@ def lock_rtc():
 @_require_admin
 def confirm_lock():
     """Admin: confirm a requested lock after reviewing proof."""
-    data = request.get_json(force=True, silent=True) or {}
-    lock_id = data.get("lock_id", "").strip()
-    proof_ref = data.get("proof_ref", "").strip()
-    notes = data.get("notes", "").strip() or None
+    data, error_response = _json_object_body()
+    if error_response:
+        return error_response
+    try:
+        lock_id = _clean_string_field(data, "lock_id")
+        proof_ref = _clean_string_field(data, "proof_ref")
+        notes = _clean_string_field(data, "notes", optional=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     if not lock_id:
         return jsonify({"error": "lock_id is required"}), 400
@@ -405,10 +455,15 @@ def release_wrtc():
 
     Returns success/error.
     """
-    data = request.get_json(force=True, silent=True) or {}
-    lock_id = data.get("lock_id", "").strip()
-    release_tx = data.get("release_tx", "").strip()
-    notes = data.get("notes", "").strip() or None
+    data, error_response = _json_object_body()
+    if error_response:
+        return error_response
+    try:
+        lock_id = _clean_string_field(data, "lock_id")
+        release_tx = _clean_string_field(data, "release_tx")
+        notes = _clean_string_field(data, "notes", optional=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     if not lock_id:
         return jsonify({"error": "lock_id is required"}), 400
@@ -467,10 +522,14 @@ def get_ledger():
     chain_filter  = request.args.get("chain", "").strip() or None
     sender_filter = request.args.get("sender", "").strip() or None
     try:
-        limit  = min(int(request.args.get("limit", 50)), 200)
-        offset = max(int(request.args.get("offset", 0)), 0)
-    except ValueError:
-        limit, offset = 50, 0
+        raw_limit = request.args.get("limit")
+        raw_offset = request.args.get("offset")
+        limit  = int(raw_limit) if raw_limit not in (None, "") else 50
+        offset = int(raw_offset) if raw_offset not in (None, "") else 0
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit and offset must be integers"}), 400
+    limit = max(1, min(limit, 200))
+    offset = max(offset, 0)
 
     where_clauses, params = [], []
     if state_filter:
@@ -621,4 +680,4 @@ if __name__ == "__main__":
     app = Flask(__name__)
     register_bridge_routes(app)
     print("Bridge dev server on http://0.0.0.0:8096")
-    app.run(host="0.0.0.0", port=8096, debug=True)
+    app.run(host="0.0.0.0", port=8096, debug=_debug_enabled())

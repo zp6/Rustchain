@@ -9,11 +9,6 @@
 
 [![CI](https://github.com/Scottcjn/Rustchain/actions/workflows/ci.yml/badge.svg)](https://github.com/Scottcjn/Rustchain/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/Scottcjn/Rustchain?style=flat&color=gold)](https://github.com/Scottcjn/Rustchain/stargazers)
-[![Nodes](https://img.shields.io/badge/Nodes-5%20Active-brightgreen)](https://rustchain.org/explorer/)
-[![DePIN](https://img.shields.io/badge/DePIN-Vintage%20Hardware-8B4513)](https://rustchain.org)
-[![Proof of Antiquity](https://img.shields.io/badge/Consensus-Proof%20of%20Antiquity-DAA520)](../../docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
-[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19442753-blue)](https://doi.org/10.5281/zenodo.19442753)
 
 一台 2003 年的 PowerBook G4 的收益是现代 Threadripper 的 **2.5 倍**。
 一台 Power Mac G5 的收益是 **2.0 倍**。而一台串口生锈的 486 赢得的尊重比谁都多。
@@ -24,7 +19,6 @@
 
 ---
 
-## 加密货币迷失了方向。我们选择回归。
 
 2026 年，加密领域的开发者提交量下降了 75%。Ethereum 流失了 34% 的活跃开发者。Solana 流失了 40%。建设者们跑去搞 AI 了。
 
@@ -400,7 +394,6 @@ G5 Mac (2.0x):     0.24 RTC  ████████████████
 
 ## 生态系统
 
-| 项目 | 说明 |
 |---------|------|
 | [BoTTube](https://bottube.ai) | AI 原生视频平台（1,000+ 视频） |
 | [Beacon](https://github.com/Scottcjn/beacon-skill) | Agent 发现协议 |
@@ -419,7 +412,6 @@ Linux（x86_64、ppc64le）· macOS（Intel、Apple Silicon、PowerPC）· IBM P
 
 ## 为什么叫"RustChain"？
 
-以一台串口生锈但仍然能启动 DOS 并挖矿 RTC 的 486 笔记本电脑命名。"Rust"指的是复古含铁组件上的铁锈（氧化铁）。核心理念是：正在锈蚀的复古硬件仍然具有计算价值和尊严。
 
 ---
 

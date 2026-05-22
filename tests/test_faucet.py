@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 import pytest
 
 from tools import testnet_faucet as faucet
@@ -48,6 +46,37 @@ def test_github_user_drip_success(app):
     assert data["amount"] == 1.0
 
 
+@pytest.mark.parametrize("body", ["[]", '"wallet"', "42"])
+def test_drip_rejects_non_object_json(app, body):
+    c = app.test_client()
+    r = c.post("/faucet/drip", data=body, content_type="application/json")
+    assert r.status_code == 400
+    assert r.get_json() == {"ok": False, "error": "json_object_required"}
+
+
+def test_drip_accepts_form_payload(app):
+    c = app.test_client()
+    r = c.post("/faucet/drip", data={"wallet": "form_wallet"})
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"wallet": ["rtc_wallet_1"]}, "wallet_must_be_string"),
+        ({"wallet": 123}, "wallet_must_be_string"),
+        ({"wallet": "rtc_wallet_1", "github_username": ["alice"]}, "github_username_must_be_string"),
+        ({"wallet": "rtc_wallet_1", "github_username": 123}, "github_username_must_be_string"),
+    ],
+)
+def test_drip_rejects_non_string_fields(app, payload, error):
+    c = app.test_client()
+    r = c.post("/faucet/drip", json=payload)
+    assert r.status_code == 400
+    assert r.get_json() == {"ok": False, "error": error}
+
+
 def test_ip_only_limit(app):
     c = app.test_client()
     h = {"X-Forwarded-For": "1.2.3.4"}
@@ -73,3 +102,35 @@ def test_github_old_account_gets_2rtc_limit(tmp_path, monkeypatch):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r3.status_code == 429
+
+
+def test_transfer_failure_does_not_expose_upstream_body(tmp_path, monkeypatch):
+    db_path = tmp_path / "faucet.db"
+    monkeypatch.setattr(faucet, "github_account_age_days", lambda *_args, **_kwargs: 30)
+
+    class FailedTransfer:
+        status_code = 500
+        text = "admin token=super-secret path=/srv/rustchain/private.db"
+
+    def fake_post(url, json, headers, timeout):
+        return FailedTransfer()
+
+    monkeypatch.setattr(faucet.requests, "post", fake_post)
+    app = faucet.create_app({"DB_PATH": str(db_path), "DRY_RUN": False})
+    app.config.update(TESTING=True)
+
+    r = app.test_client().post(
+        "/faucet/drip",
+        json={"wallet": "rtc_wallet_1", "github_username": "alice"},
+    )
+    body = r.get_json()
+
+    assert r.status_code == 502
+    assert body == {
+        "ok": False,
+        "error": "transfer_failed",
+        "details": {"error": "transfer_failed_500"},
+    }
+    response_text = r.get_data(as_text=True)
+    assert "super-secret" not in response_text
+    assert "/srv/rustchain/private.db" not in response_text

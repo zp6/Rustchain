@@ -13,6 +13,29 @@ from typing import List, Dict
 
 from flask import jsonify, request
 
+
+def _parse_int_query_arg(
+    raw_value,
+    name: str,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    if raw_value is None or raw_value == "":
+        value = default
+    else:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be an integer")
+
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
+
+
 # ============================================================================
 # PEER DISCOVERY & MANAGEMENT
 # ============================================================================
@@ -415,6 +438,13 @@ def add_p2p_endpoints(app, peer_manager, block_sync, tx_gossip):
             return jsonify({"ok": False, "error": "JSON object required"}), 400
 
         peer_url = data.get('peer_url')
+        if peer_url is None:
+            return jsonify({"ok": False, "error": "peer_url required"}), 400
+
+        if not isinstance(peer_url, str):
+            return jsonify({"ok": False, "error": "peer_url must be a string"}), 400
+
+        peer_url = peer_url.strip()
 
         if peer_url:
             success = peer_manager.add_peer(peer_url)
@@ -431,8 +461,11 @@ def add_p2p_endpoints(app, peer_manager, block_sync, tx_gossip):
     @app.route('/api/blocks', methods=['GET'])
     def get_blocks():
         """Get blocks for sync (start height, limit)"""
-        start = request.args.get('start', 0, type=int)
-        limit = request.args.get('limit', 100, type=int)
+        try:
+            start = _parse_int_query_arg(request.args.get('start'), "start", 0, minimum=0)
+            limit = _parse_int_query_arg(request.args.get('limit'), "limit", 100, minimum=1, maximum=1000)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
         # Fetch blocks from database
         with sqlite3.connect(peer_manager.db_path) as conn:

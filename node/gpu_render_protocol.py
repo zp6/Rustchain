@@ -29,10 +29,22 @@ import os
 import logging
 import hashlib
 import hmac
+import math
 import secrets
 from functools import wraps
 
 logger = logging.getLogger("gpu_render_protocol")
+
+VALID_JOB_TYPES = ("render", "tts", "stt", "llm")
+
+
+def _normalize_job_type(job_type):
+    """Return a canonical job type or None when the value is unsupported."""
+    if not isinstance(job_type, str):
+        return None
+    normalized = job_type.strip().lower()
+    return normalized if normalized in VALID_JOB_TYPES else None
+
 
 # ---------------------------------------------------------------------------
 # Database schema
@@ -231,12 +243,15 @@ class GPURenderProtocol:
 
     def list_gpu_nodes(self, job_type=None, device_arch=None) -> list:
         """List active GPU nodes, optionally filtered by capability or arch."""
+        normalized_job_type = _normalize_job_type(job_type) if job_type else None
+        if job_type and normalized_job_type is None:
+            return []
         conn = self._get_conn()
         try:
             query = "SELECT * FROM gpu_attestations WHERE status='active'"
             params = []
-            if job_type:
-                col = f"supports_{job_type}"
+            if normalized_job_type:
+                col = f"supports_{normalized_job_type}"
                 query += f" AND {col}=1"
             if device_arch:
                 query += " AND device_arch=?"
@@ -254,15 +269,15 @@ class GPURenderProtocol:
     def create_escrow(self, job_type: str, from_wallet: str, to_wallet: str,
                       amount_rtc: float, metadata: dict = None) -> dict:
         """Lock RTC in escrow for a compute job."""
-        valid_types = ("render", "tts", "stt", "llm")
-        if job_type not in valid_types:
-            return {"error": f"job_type must be one of {valid_types}"}
+        normalized_job_type = _normalize_job_type(job_type)
+        if normalized_job_type is None:
+            return {"error": f"job_type must be one of {VALID_JOB_TYPES}"}
         if amount_rtc <= 0:
             return {"error": "amount_rtc must be positive"}
         if from_wallet == to_wallet:
             return {"error": "from_wallet and to_wallet must differ"}
 
-        job_id = f"{job_type}-{uuid.uuid4().hex[:12]}"
+        job_id = f"{normalized_job_type}-{uuid.uuid4().hex[:12]}"
         escrow_secret = secrets.token_hex(16)
         conn = self._get_conn()
         try:
@@ -271,7 +286,7 @@ class GPURenderProtocol:
                    (job_id, job_type, from_wallet, to_wallet, amount_rtc,
                     status, created_at, escrow_secret_hash, metadata)
                    VALUES (?,?,?,?,?,'locked',?,?,?)""",
-                (job_id, job_type, from_wallet, to_wallet, amount_rtc,
+                (job_id, normalized_job_type, from_wallet, to_wallet, amount_rtc,
                  int(time.time()), self._hash_escrow_secret(escrow_secret),
                  json.dumps(metadata or {})),
             )
@@ -279,7 +294,7 @@ class GPURenderProtocol:
             return {
                 "status": "locked",
                 "job_id": job_id,
-                "job_type": job_type,
+                "job_type": normalized_job_type,
                 "amount_rtc": amount_rtc,
                 "from_wallet": from_wallet,
                 "to_wallet": to_wallet,
@@ -381,6 +396,9 @@ class GPURenderProtocol:
 
     def get_fair_market_rates(self, job_type=None) -> dict:
         """Calculate fair market rates from active GPU node pricing."""
+        normalized_job_type = _normalize_job_type(job_type) if job_type else None
+        if job_type and normalized_job_type is None:
+            return {"error": f"job_type must be one of {VALID_JOB_TYPES}", "rates": {}}
         conn = self._get_conn()
         try:
             nodes = conn.execute(
@@ -397,7 +415,7 @@ class GPURenderProtocol:
                 "llm": "price_llm_1k_tokens",
             }
 
-            types_to_check = [job_type] if job_type else list(price_fields.keys())
+            types_to_check = [normalized_job_type] if normalized_job_type else list(price_fields.keys())
             rates = {}
 
             for jt in types_to_check:
@@ -430,11 +448,14 @@ class GPURenderProtocol:
 
     def detect_price_manipulation(self, job_type: str, proposed_price: float) -> dict:
         """Check if a proposed price deviates significantly from market rates."""
-        rates = self.get_fair_market_rates(job_type)
-        if "error" in rates or job_type not in rates.get("rates", {}):
+        normalized_job_type = _normalize_job_type(job_type)
+        if normalized_job_type is None:
+            return {"error": f"job_type must be one of {VALID_JOB_TYPES}"}
+        rates = self.get_fair_market_rates(normalized_job_type)
+        if "error" in rates or normalized_job_type not in rates.get("rates", {}):
             return {"manipulated": False, "reason": "insufficient data"}
 
-        r = rates["rates"][job_type]
+        r = rates["rates"][normalized_job_type]
         # Flag if price is >3x the average or <0.1x the minimum
         if proposed_price > r["avg"] * 3:
             return {"manipulated": True, "reason": "price_too_high",
@@ -452,22 +473,90 @@ class GPURenderProtocol:
 
 def register_routes(app):
     """Register GPU Render Protocol routes with a Flask app."""
+    from flask import jsonify, request
+
     protocol = GPURenderProtocol()
+
+    def _json_object_body():
+        data = request.get_json(force=True, silent=True)
+        if data is None:
+            return {}, None
+        if not isinstance(data, dict):
+            return None, (jsonify({"error": "JSON object required"}), 400)
+        return data, None
+
+    _MISSING = object()
+
+    def _string_field(data, name: str, default: str = ""):
+        value = data.get(name, _MISSING)
+        if value is _MISSING or value == "":
+            return default, None
+        if not isinstance(value, str):
+            return None, (jsonify({"error": f"{name} must be a string"}), 400)
+        return value, None
+
+    def _finite_number_field(data, name: str, default: float = 0.0):
+        value = data.get(name, default)
+        if isinstance(value, bool):
+            return None, (jsonify({"error": f"{name} must be a finite number"}), 400)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None, (jsonify({"error": f"{name} must be a finite number"}), 400)
+        if not math.isfinite(parsed):
+            return None, (jsonify({"error": f"{name} must be a finite number"}), 400)
+        return parsed, None
+
+    def _sanitize_optional_string(data, name: str):
+        if name not in data:
+            return None
+        value, error_response = _string_field(data, name, default=None)
+        if error_response is not None:
+            return error_response
+        data[name] = value
+        return None
+
+    def _sanitize_optional_number(data, name: str):
+        if name not in data:
+            return None
+        value, error_response = _finite_number_field(data, name)
+        if error_response is not None:
+            return error_response
+        data[name] = value
+        return None
 
     @app.route("/gpu/attest", methods=["POST"])
     def gpu_attest():
-        from flask import request, jsonify
-        data = request.get_json(force=True)
-        miner_id = data.get("miner_id")
+        data, error_response = _json_object_body()
+        if error_response is not None:
+            return error_response
+        data = dict(data)
+        miner_id, error_response = _string_field(data, "miner_id")
+        if error_response is not None:
+            return error_response
         if not miner_id:
             return jsonify({"error": "miner_id required"}), 400
+        for field in ("gpu_model", "device_arch", "cuda_version", "rocm_version"):
+            error_response = _sanitize_optional_string(data, field)
+            if error_response is not None:
+                return error_response
+        for field in (
+            "vram_gb",
+            "benchmark_score",
+            "price_render_minute",
+            "price_tts_1k_chars",
+            "price_stt_minute",
+            "price_llm_1k_tokens",
+        ):
+            error_response = _sanitize_optional_number(data, field)
+            if error_response is not None:
+                return error_response
         result = protocol.attest_gpu(miner_id, data)
         status_code = 200 if "error" not in result else 400
         return jsonify(result), status_code
 
     @app.route("/gpu/nodes", methods=["GET"])
     def gpu_nodes():
-        from flask import request, jsonify
         job_type = request.args.get("job_type")
         device_arch = request.args.get("device_arch")
         nodes = protocol.list_gpu_nodes(job_type, device_arch)
@@ -477,23 +566,38 @@ def register_routes(app):
     @app.route("/voice/escrow", methods=["POST"])
     @app.route("/llm/escrow", methods=["POST"])
     def create_escrow():
-        from flask import request, jsonify
-        data = request.get_json(force=True)
+        data, error_response = _json_object_body()
+        if error_response is not None:
+            return error_response
         # Infer job_type from path
         path = request.path
         if path.startswith("/voice"):
-            job_type = data.get("job_type", "tts")  # tts or stt
+            job_type, error_response = _string_field(data, "job_type", "tts")  # tts or stt
         elif path.startswith("/llm"):
             job_type = "llm"
         else:
-            job_type = data.get("job_type", "render")
+            job_type, error_response = _string_field(data, "job_type", "render")
+        if error_response is not None:
+            return error_response
+        from_wallet, error_response = _string_field(data, "from_wallet")
+        if error_response is not None:
+            return error_response
+        to_wallet, error_response = _string_field(data, "to_wallet")
+        if error_response is not None:
+            return error_response
+        amount_rtc, error_response = _finite_number_field(data, "amount_rtc")
+        if error_response is not None:
+            return error_response
+        metadata = data.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return jsonify({"error": "metadata must be an object"}), 400
 
         result = protocol.create_escrow(
             job_type=job_type,
-            from_wallet=data.get("from_wallet", ""),
-            to_wallet=data.get("to_wallet", ""),
-            amount_rtc=data.get("amount_rtc", 0),
-            metadata=data.get("metadata"),
+            from_wallet=from_wallet,
+            to_wallet=to_wallet,
+            amount_rtc=amount_rtc,
+            metadata=metadata,
         )
         status_code = 201 if "error" not in result else 400
         return jsonify(result), status_code
@@ -502,49 +606,74 @@ def register_routes(app):
     @app.route("/voice/release", methods=["POST"])
     @app.route("/llm/release", methods=["POST"])
     def release_escrow():
-        from flask import request, jsonify
-        data = request.get_json(force=True)
+        data, error_response = _json_object_body()
+        if error_response is not None:
+            return error_response
+        job_id, error_response = _string_field(data, "job_id")
+        if error_response is not None:
+            return error_response
+        actor_wallet, error_response = _string_field(data, "actor_wallet")
+        if error_response is not None:
+            return error_response
+        escrow_secret, error_response = _string_field(data, "escrow_secret")
+        if error_response is not None:
+            return error_response
         result = protocol.release_escrow(
-            data.get("job_id", ""),
-            actor_wallet=data.get("actor_wallet", ""),
-            escrow_secret=data.get("escrow_secret", ""),
+            job_id,
+            actor_wallet=actor_wallet,
+            escrow_secret=escrow_secret,
         )
         status_code = 200 if "error" not in result else 400
         return jsonify(result), status_code
 
     @app.route("/render/refund", methods=["POST"])
     def refund_escrow():
-        from flask import request, jsonify
-        data = request.get_json(force=True)
+        data, error_response = _json_object_body()
+        if error_response is not None:
+            return error_response
+        job_id, error_response = _string_field(data, "job_id")
+        if error_response is not None:
+            return error_response
+        actor_wallet, error_response = _string_field(data, "actor_wallet")
+        if error_response is not None:
+            return error_response
+        escrow_secret, error_response = _string_field(data, "escrow_secret")
+        if error_response is not None:
+            return error_response
         result = protocol.refund_escrow(
-            data.get("job_id", ""),
-            actor_wallet=data.get("actor_wallet", ""),
-            escrow_secret=data.get("escrow_secret", ""),
+            job_id,
+            actor_wallet=actor_wallet,
+            escrow_secret=escrow_secret,
         )
         status_code = 200 if "error" not in result else 400
         return jsonify(result), status_code
 
     @app.route("/render/escrow/<job_id>", methods=["GET"])
     def get_escrow(job_id):
-        from flask import jsonify
         result = protocol.get_escrow(job_id)
         status_code = 200 if "error" not in result else 404
         return jsonify(result), status_code
 
     @app.route("/render/pricing", methods=["GET"])
     def get_pricing():
-        from flask import request, jsonify
         job_type = request.args.get("job_type")
         result = protocol.get_fair_market_rates(job_type)
         return jsonify(result)
 
     @app.route("/render/pricing/check", methods=["POST"])
     def check_pricing():
-        from flask import request, jsonify
-        data = request.get_json(force=True)
+        data, error_response = _json_object_body()
+        if error_response is not None:
+            return error_response
+        job_type, error_response = _string_field(data, "job_type", "render")
+        if error_response is not None:
+            return error_response
+        price, error_response = _finite_number_field(data, "price")
+        if error_response is not None:
+            return error_response
         result = protocol.detect_price_manipulation(
-            data.get("job_type", "render"),
-            data.get("price", 0),
+            job_type,
+            price,
         )
         return jsonify(result)
 

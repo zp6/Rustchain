@@ -22,11 +22,14 @@ sys.path.insert(0, str(ACTION_DIR))
 
 from award_rtc import (
     Config,
+    build_transfer_url,
     resolve_wallet,
     resolve_wallet_from_pr_body,
     resolve_wallet_from_file,
     check_already_awarded,
+    is_endpoint_unreachable_error,
     set_output,
+    transfer_rtc,
     _AWARD_MARKER,
 )
 
@@ -151,6 +154,10 @@ class TestCheckAlreadyAwarded(unittest.TestCase):
         comments = [{"body": f"<!-- {_AWARD_MARKER}:FAILED -->"}]
         self.assertFalse(check_already_awarded(comments))
 
+    def test_manual_required_marker_blocks_automatic_retry_until_human_resets(self):
+        comments = [{"body": f"<!-- {_AWARD_MARKER}:MANUAL-REQUIRED -->"}]
+        self.assertTrue(check_already_awarded(comments))
+
     def test_failed_text_outside_marker_does_not_hide_success_marker(self):
         comments = [{"body": f"failed before marker\n<!-- {_AWARD_MARKER} tx=xyz -->"}]
         self.assertTrue(check_already_awarded(comments))
@@ -168,6 +175,7 @@ class TestConfig(unittest.TestCase):
         """Create a Config with the given environment variable overrides."""
         env = {
             "INPUT_RTC_AMOUNT": "50",
+            "INPUT_RTC_API_URL": "",
             "INPUT_RTC_VPS_HOST": "1.2.3.4",
             "INPUT_RTC_ADMIN_KEY": "test-key-32-chars-long!!",
             "INPUT_FROM_WALLET": "founder_community",
@@ -195,6 +203,43 @@ class TestConfig(unittest.TestCase):
         self.assertFalse(cfg.dry_run)
         self.assertTrue(cfg.post_comment)
 
+    def test_trims_scalar_inputs(self):
+        cfg = self._cfg(
+            INPUT_RTC_AMOUNT=" 50\n",
+            INPUT_RTC_API_URL=" https://rustchain.org/wallet/transfer\n",
+            INPUT_RTC_VPS_HOST=" 1.2.3.4\n",
+            INPUT_RTC_ADMIN_KEY=" test-key-32-chars-long!!\n",
+            INPUT_FROM_WALLET=" founder_community\n",
+            INPUT_DRY_RUN=" true\n",
+            INPUT_POST_COMMENT=" true\n",
+            INPUT_GITHUB_TOKEN=" ghp_test\n",
+            INPUT_REPO_PATH=" .\n",
+            INPUT_MAX_AMOUNT=" 10000\n",
+            GITHUB_REPOSITORY=" test/repo\n",
+            PR_NUMBER=" 42\n",
+            PR_AUTHOR=" alice\n",
+            PR_MERGED=" true\n",
+            PR_HEAD_SHA=" abc123\n",
+            PR_TITLE=" Test PR\n",
+        )
+
+        self.assertEqual(cfg.rtc_amount, 50.0)
+        self.assertEqual(cfg.rtc_api_url, "https://rustchain.org/wallet/transfer")
+        self.assertEqual(cfg.vps_host, "1.2.3.4")
+        self.assertEqual(cfg.admin_key, "test-key-32-chars-long!!")
+        self.assertEqual(cfg.from_wallet, "founder_community")
+        self.assertTrue(cfg.dry_run)
+        self.assertTrue(cfg.post_comment)
+        self.assertEqual(cfg.github_token, "ghp_test")
+        self.assertEqual(cfg.repo_path, ".")
+        self.assertEqual(cfg.max_amount, 10000.0)
+        self.assertEqual(cfg.repo, "test/repo")
+        self.assertEqual(cfg.pr_number, "42")
+        self.assertEqual(cfg.pr_author, "alice")
+        self.assertEqual(cfg.pr_merged, "true")
+        self.assertEqual(cfg.pr_head_sha, "abc123")
+        self.assertEqual(cfg.pr_title, "Test PR")
+
     def test_dry_run_mode(self):
         cfg = self._cfg(INPUT_DRY_RUN="true")
         self.assertTrue(cfg.dry_run)
@@ -211,6 +256,14 @@ class TestConfig(unittest.TestCase):
         cfg = self._cfg(INPUT_RTC_VPS_HOST="", INPUT_DRY_RUN="false")
         self.assertIsNotNone(cfg.validate())
 
+    def test_validate_allows_api_url_without_legacy_host(self):
+        cfg = self._cfg(
+            INPUT_RTC_API_URL="https://rustchain.org/wallet/transfer",
+            INPUT_RTC_VPS_HOST="",
+            INPUT_DRY_RUN="false",
+        )
+        self.assertIsNone(cfg.validate())
+
     def test_validate_missing_admin_key_in_live_mode(self):
         cfg = self._cfg(INPUT_RTC_ADMIN_KEY="", INPUT_DRY_RUN="false")
         self.assertIsNotNone(cfg.validate())
@@ -222,6 +275,50 @@ class TestConfig(unittest.TestCase):
     def test_validate_negative_amount(self):
         cfg = self._cfg(INPUT_RTC_AMOUNT="-5")
         self.assertIsNotNone(cfg.validate())
+
+    def test_validate_rejects_nan_amount(self):
+        cfg = self._cfg(INPUT_RTC_AMOUNT="nan")
+        self.assertEqual(cfg.validate(), "rtc-amount must be finite, got nan")
+
+    def test_validate_rejects_infinite_amount(self):
+        cfg = self._cfg(INPUT_RTC_AMOUNT="inf")
+        self.assertEqual(cfg.validate(), "rtc-amount must be finite, got inf")
+
+    def test_validate_rejects_nan_max_amount(self):
+        cfg = self._cfg(INPUT_MAX_AMOUNT="nan")
+        self.assertEqual(cfg.validate(), "max-amount must be finite, got nan")
+
+
+# ---------------------------------------------------------------------------
+# Transfer error classification tests
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointUnreachableError(unittest.TestCase):
+    """Test classification of network errors that require manual follow-up."""
+
+    def test_matches_common_network_failures(self):
+        samples = [
+            "Connection failed: [Errno 111] Connection refused",
+            "timed out while connecting to the RustChain endpoint",
+            "Temporary failure in name resolution",
+            "No route to host",
+            "Network is unreachable",
+            "Connection reset by peer",
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertTrue(is_endpoint_unreachable_error(sample))
+
+    def test_does_not_match_business_logic_rejections(self):
+        samples = [
+            "Insufficient balance",
+            "invalid recipient wallet",
+            "amount exceeds safety cap",
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertFalse(is_endpoint_unreachable_error(sample))
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +348,58 @@ class TestSetOutput(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# transfer_rtc tests
+# ---------------------------------------------------------------------------
+
+
+class TestTransferRtc(unittest.TestCase):
+    """Test RustChain transfer API request construction."""
+
+    def test_build_transfer_url_preserves_full_path(self):
+        self.assertEqual(
+            build_transfer_url("https://rustchain.org/wallet/transfer"),
+            "https://rustchain.org/wallet/transfer",
+        )
+
+    def test_build_transfer_url_appends_transfer_path_to_origin(self):
+        self.assertEqual(
+            build_transfer_url("https://rustchain.org"),
+            "https://rustchain.org/wallet/transfer",
+        )
+
+    def test_build_transfer_url_keeps_legacy_host_mode(self):
+        self.assertEqual(
+            build_transfer_url("1.2.3.4"),
+            "http://1.2.3.4:8099/wallet/transfer",
+        )
+
+    def test_strips_scalar_request_values(self):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"ok": true, "tx_hash": "tx_abc"}'
+
+        with patch("award_rtc.urlopen", return_value=mock_resp) as mock_urlopen:
+            ok, result = transfer_rtc(
+                " https://rustchain.org/wallet/transfer\n",
+                " test-admin-key\n",
+                " founder_community\n",
+                " alice\n",
+                5.0,
+                "PR #4559 auto-bounty",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(result["tx_hash"], "tx_abc")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://rustchain.org/wallet/transfer")
+        self.assertEqual(req.get_header("X-admin-key"), "test-admin-key")
+
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(payload["from_miner"], "founder_community")
+        self.assertEqual(payload["to_miner"], "alice")
+
+
+# ---------------------------------------------------------------------------
 # Integration-style main() tests
 # ---------------------------------------------------------------------------
 
@@ -264,6 +413,7 @@ class TestMainFlow(unittest.TestCase):
         output_file.close()
         env = {
             "INPUT_RTC_AMOUNT": "75",
+            "INPUT_RTC_API_URL": "",
             "INPUT_RTC_VPS_HOST": "1.2.3.4",
             "INPUT_RTC_ADMIN_KEY": "test-admin-key-32chars!!",
             "INPUT_FROM_WALLET": "founder_community",
@@ -347,6 +497,16 @@ class TestMainFlow(unittest.TestCase):
         # Should have posted a dry-run comment
         mock_post.assert_called_once()
 
+    def test_dry_run_rejects_nan_amount(self):
+        from award_rtc import main
+        with self._env(INPUT_DRY_RUN="true", INPUT_RTC_AMOUNT="nan"):
+            with patch("award_rtc.fetch_pr_comments") as mock_fetch:
+                with patch("award_rtc.post_pr_comment") as mock_post:
+                    rc = main()
+        self.assertEqual(rc, 1)
+        mock_fetch.assert_not_called()
+        mock_post.assert_not_called()
+
     def test_successful_transfer(self):
         from award_rtc import main
         transfer_result = {
@@ -370,6 +530,35 @@ class TestMainFlow(unittest.TestCase):
             with patch("award_rtc.fetch_pr_comments", return_value=[]):
                 with patch("award_rtc.transfer_rtc", return_value=(False, transfer_result)):
                     with patch("award_rtc.post_pr_comment", return_value=True):
+                        rc = main()
+        self.assertEqual(rc, 1)
+
+    def test_connection_failure_posts_manual_notice_without_failing_job(self):
+        from award_rtc import main
+        transfer_result = {
+            "ok": False,
+            "error": "Connection failed: [Errno 111] Connection refused",
+        }
+        with self._env():
+            with patch("award_rtc.fetch_pr_comments", return_value=[]):
+                with patch("award_rtc.transfer_rtc", return_value=(False, transfer_result)):
+                    with patch("award_rtc.post_pr_comment", return_value=True) as mock_post:
+                        rc = main()
+        self.assertEqual(rc, 0)
+        comment_body = mock_post.call_args[0][2]
+        self.assertIn("Manual Transfer Required", comment_body)
+        self.assertIn(":MANUAL-REQUIRED", comment_body)
+
+    def test_connection_failure_fails_when_manual_notice_cannot_be_posted(self):
+        from award_rtc import main
+        transfer_result = {
+            "ok": False,
+            "error": "Connection failed: [Errno 111] Connection refused",
+        }
+        with self._env():
+            with patch("award_rtc.fetch_pr_comments", return_value=[]):
+                with patch("award_rtc.transfer_rtc", return_value=(False, transfer_result)):
+                    with patch("award_rtc.post_pr_comment", return_value=False):
                         rc = main()
         self.assertEqual(rc, 1)
 

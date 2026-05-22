@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 import sqlite3
 import hashlib
 import time
-import json
 import logging
+import random
 
 hall_bp = Blueprint('hall_of_rust', __name__)
 logger = logging.getLogger(__name__)
@@ -157,7 +157,9 @@ def estimate_manufacture_year(model, arch):
 @hall_bp.route('/hall/induct', methods=['POST'])
 def induct_machine():
     """Automatically induct a machine into the Hall of Rust on first attestation."""
-    data = request.json or {}
+    data, error_response = _json_object_or_empty()
+    if error_response:
+        return error_response
     
     # Generate fingerprint hash from hardware identifiers
     # SECURITY FIX: Fingerprint based on HARDWARE ONLY (not wallet ID)
@@ -278,7 +280,9 @@ def rust_leaderboard():
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         
-        limit = request.args.get('limit', 50, type=int)
+        limit, error_response = _parse_limit_arg()
+        if error_response:
+            return error_response
         
         c.execute("""
             SELECT fingerprint_hash, miner_id, device_arch, device_model,
@@ -310,7 +314,16 @@ def rust_leaderboard():
 @hall_bp.route('/hall/eulogy/<fingerprint>', methods=['POST'])
 def set_eulogy(fingerprint):
     """Set a eulogy/nickname for a machine. For when it finally dies."""
-    data = request.json or {}
+    data, error_response = _json_object_or_empty()
+    if error_response:
+        return error_response
+
+    nickname, error_response = _optional_text_field(data, 'nickname', 64)
+    if error_response:
+        return error_response
+    eulogy, error_response = _optional_text_field(data, 'eulogy', 500)
+    if error_response:
+        return error_response
     
     try:
         from flask import current_app
@@ -323,11 +336,11 @@ def set_eulogy(fingerprint):
         
         if 'nickname' in data:
             updates.append('nickname = ?')
-            params.append(data['nickname'][:64])
+            params.append(nickname)
         
         if 'eulogy' in data:
             updates.append('eulogy = ?')
-            params.append(data['eulogy'][:500])
+            params.append(eulogy)
         
         if 'is_deceased' in data and data['is_deceased']:
             updates.append('is_deceased = 1')
@@ -448,6 +461,39 @@ def _table_exists(cursor, table_name):
     return row is not None
 
 
+def _parse_limit_arg(default=50, max_value=500):
+    raw_value = request.args.get('limit')
+    if raw_value is None or raw_value == '':
+        return default, None
+    try:
+        limit = int(raw_value)
+    except (TypeError, ValueError):
+        return None, ("limit must be an integer", 400)
+    if limit < 0:
+        return None, ("limit must be non-negative", 400)
+    return min(limit, max_value), None
+
+
+def _json_object_or_empty():
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}, None
+    if not isinstance(data, dict):
+        return None, (jsonify({'error': 'JSON object required'}), 400)
+    return data, None
+
+
+def _optional_text_field(data, name, limit):
+    if name not in data:
+        return None, None
+    value = data[name]
+    if value is None:
+        return "", None
+    if not isinstance(value, str):
+        return None, (jsonify({'error': f'{name} must be a string'}), 400)
+    return value[:limit], None
+
+
 def _internal_error_response(context):
     logger.exception("Hall of Rust endpoint failed: %s", context)
     return jsonify({'error': 'internal_error'}), 500
@@ -460,7 +506,9 @@ def api_hall_of_fame_leaderboard():
     GET /api/hall_of_fame/leaderboard?limit=50&deceased=0|1
     Returns machines ordered by rust_score DESC with badge decoration.
     """
-    limit = min(int(request.args.get('limit', 50) or 50), 500)
+    limit, error_response = _parse_limit_arg()
+    if error_response:
+        return error_response
     deceased_filter = request.args.get('deceased')  # '0', '1', or omitted (all)
 
     try:
@@ -643,8 +691,6 @@ def register_hall_endpoints(app, db_path):
     print("[HALL OF RUST] Endpoints registered - The machines will be remembered!")
 
 # ============== ENHANCED STATS ==============
-
-import random
 
 # Fun facts about vintage hardware
 VINTAGE_FACTS = [

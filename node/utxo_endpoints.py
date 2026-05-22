@@ -16,8 +16,6 @@ Endpoints:
     POST /utxo/transfer            - UTXO-native signed transfer
 """
 
-import decimal
-import hashlib
 import json
 import logging
 import sqlite3
@@ -26,7 +24,12 @@ from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, request, jsonify
 
-from utxo_db import UtxoDB, coin_select, address_to_proposition, UNIT
+from utxo_db import (
+    DUST_THRESHOLD,
+    UtxoDB,
+    coin_select,
+    UNIT,
+)
 
 # FIX(#2867 M2): Reject inputs that would overflow int64 (signed) or
 # represent absurd amounts. Total RTC supply is bounded; cap at 2^53 RTC
@@ -82,6 +85,11 @@ def _decimal_to_nrtc(amount: Decimal, field_name: str) -> int:
     return int(integral)
 
 
+def _nrtc_to_rtc_float(amount_nrtc: int) -> float:
+    """Convert exact nanoRTC integer amounts to JSON-compatible RTC floats."""
+    return float(Decimal(amount_nrtc) / Decimal(UNIT))
+
+
 def _ensure_signed_float_preserves_nrtc(amount: Decimal, nrtc: int,
                                         field_name: str) -> None:
     """
@@ -100,6 +108,20 @@ def _ensure_signed_float_preserves_nrtc(amount: Decimal, nrtc: int,
 # This MUST match the multiplier used in rustchain_v2_integrated_v2.2.1_rip200.py
 # (e.g. line 2370: amount_i64 = int(amount_decimal * Decimal(1000000))).
 ACCOUNT_UNIT = 1_000_000  # 1 RTC = 1,000,000 uRTC (6 decimals)
+LEGACY_SIGNATURE_CUTOFF_TS = 1782864000  # 2026-07-01T00:00:00Z
+
+
+def _decimal_to_account_i64(amount: Decimal, field_name: str) -> int:
+    """Convert an RTC Decimal to the legacy 6-decimal account unit exactly."""
+    units = amount * ACCOUNT_UNIT
+    integral = units.to_integral_value()
+    if units != integral:
+        raise ValueError(
+            f"{field_name} cannot be mirrored by dual-write account model "
+            "(max 6 decimal places)"
+        )
+    return int(integral)
+
 
 utxo_bp = Blueprint('utxo', __name__, url_prefix='/utxo')
 
@@ -148,6 +170,15 @@ def _missing_transfer_nonce(nonce) -> bool:
         or not isinstance(nonce, (int, str))
         or (isinstance(nonce, str) and nonce.strip() == '')
     )
+
+
+def _transfer_string_field(data: dict, field: str):
+    value = data.get(field)
+    if value is None:
+        return '', None
+    if not isinstance(value, str):
+        return None, (jsonify({'error': f'{field} must be a string'}), 400)
+    return value.strip(), None
 
 
 def register_utxo_blueprint(app, utxo_db: UtxoDB, db_path: str,
@@ -357,12 +388,22 @@ def utxo_transfer():
     if not isinstance(data, dict):
         return jsonify({'error': 'JSON object body required'}), 400
 
-    from_address = (data.get('from_address') or '').strip()
-    to_address = (data.get('to_address') or '').strip()
-    public_key = (data.get('public_key') or '').strip()
-    signature = (data.get('signature') or '').strip()
+    from_address, error_response = _transfer_string_field(data, 'from_address')
+    if error_response:
+        return error_response
+    to_address, error_response = _transfer_string_field(data, 'to_address')
+    if error_response:
+        return error_response
+    public_key, error_response = _transfer_string_field(data, 'public_key')
+    if error_response:
+        return error_response
+    signature, error_response = _transfer_string_field(data, 'signature')
+    if error_response:
+        return error_response
     nonce = data.get('nonce')
     memo = data.get('memo', '')
+    if not isinstance(memo, str):
+        return jsonify({'error': 'memo must be a string'}), 400
     # FIX(#2867 M2): exact Decimal parsing with bounds check (was float()).
     try:
         amount_rtc = _parse_rtc_amount(data.get('amount_rtc', 0))
@@ -390,8 +431,24 @@ def utxo_transfer():
         fee_nrtc = _decimal_to_nrtc(fee_rtc, 'fee_rtc')
         _ensure_signed_float_preserves_nrtc(amount_rtc, amount_nrtc, 'amount_rtc')
         _ensure_signed_float_preserves_nrtc(fee_rtc, fee_nrtc, 'fee_rtc')
+        amount_i64_for_dual_write = None
+        fee_i64_for_dual_write = None
+        if _dual_write:
+            amount_i64_for_dual_write = _decimal_to_account_i64(
+                amount_rtc, 'amount_rtc'
+            )
+            fee_i64_for_dual_write = _decimal_to_account_i64(
+                fee_rtc, 'fee_rtc'
+            )
     except ValueError as e:
         return jsonify({'error': f'Invalid amount: {e}'}), 400
+
+    if amount_nrtc < DUST_THRESHOLD:
+        return jsonify({
+            'error': 'Amount below dust threshold',
+            'amount_nrtc': amount_nrtc,
+            'dust_threshold_nrtc': DUST_THRESHOLD,
+        }), 400
 
     # Verify pubkey → address
     expected_addr = _addr_from_pk_fn(public_key)
@@ -440,6 +497,11 @@ def utxo_transfer():
                 'error': 'Legacy signature format cannot authorize nonzero fee',
                 'code': 'LEGACY_SIGNATURE_FEE_UNBOUND',
             }), 401
+        if int(time.time()) >= LEGACY_SIGNATURE_CUTOFF_TS:
+            return jsonify({
+                'error': 'Legacy signature format expired. Upgrade client to sign fee_rtc.',
+                'code': 'LEGACY_SIGNATURE_EXPIRED',
+            }), 401
         logging.warning(
             "[UTXO/SIG] DEPRECATED: signature without fee accepted for %s... "
             "Upgrade client to include fee in signed message.",
@@ -473,6 +535,11 @@ def utxo_transfer():
     outputs = [{'address': to_address, 'value_nrtc': amount_nrtc}]
     if change_nrtc > 0:
         outputs.append({'address': from_address, 'value_nrtc': change_nrtc})
+    selected_total_nrtc = sum(u['value_nrtc'] for u in selected)
+    absorbed_fee_nrtc = selected_total_nrtc - amount_nrtc - fee_nrtc - change_nrtc
+    if absorbed_fee_nrtc < 0:
+        return jsonify({'error': 'UTXO coin selection underfunded transaction'}), 500
+    effective_fee_nrtc = fee_nrtc + absorbed_fee_nrtc
 
     # Build and apply UTXO transaction
     block_height = _current_slot_fn()
@@ -481,7 +548,7 @@ def utxo_transfer():
         'inputs': [{'box_id': u['box_id'], 'spending_proof': signature}
                    for u in selected],
         'outputs': outputs,
-        'fee_nrtc': fee_nrtc,
+        'fee_nrtc': effective_fee_nrtc,
         'timestamp': int(time.time()),
     }
 
@@ -519,7 +586,9 @@ def utxo_transfer():
         try:
             conn = sqlite3.connect(_db_path)
             c = conn.cursor()
-            amount_i64 = int(amount_rtc * ACCOUNT_UNIT)
+            amount_i64 = amount_i64_for_dual_write
+            fee_i64 = fee_i64_for_dual_write
+            debit_i64 = amount_i64 + fee_i64
 
             # Re-check sender shadow-balance before debit (security: prevent
             # negative-balance minting when account-model diverges from UTXO
@@ -528,26 +597,26 @@ def utxo_transfer():
                       (from_address,))
             shadow_row = c.fetchone()
             shadow_balance = shadow_row[0] if shadow_row else 0
-            if shadow_balance < amount_i64:
+            if shadow_balance < debit_i64:
                 conn.close()
                 print(
                     f"[UTXO] WARNING: dual-write skipped — insufficient "
                     f"shadow balance for {from_address[:20]}... "
-                    f"(have {shadow_balance}, need {amount_i64})"
+                    f"(have {shadow_balance}, need {debit_i64})"
                 )
             else:
                 c.execute("INSERT OR IGNORE INTO balances (miner_id, amount_i64) VALUES (?, 0)",
                           (to_address,))
                 c.execute("UPDATE balances SET amount_i64 = amount_i64 - ? WHERE miner_id = ?",
-                          (amount_i64, from_address))
+                          (debit_i64, from_address))
                 c.execute("UPDATE balances SET amount_i64 = amount_i64 + ? WHERE miner_id = ?",
                           (amount_i64, to_address))
                 now = int(time.time())
                 slot = _current_slot_fn()
                 c.execute(
                     "INSERT INTO ledger (ts, epoch, miner_id, delta_i64, reason) VALUES (?,?,?,?,?)",
-                    (now, slot, from_address, -amount_i64,
-                     f"utxo_transfer_out:{to_address[:20]}:{memo[:30]}")
+                    (now, slot, from_address, -debit_i64,
+                     f"utxo_transfer_out:{to_address[:20]}:fee={fee_i64}:{memo[:30]}")
                 )
                 c.execute(
                     "INSERT INTO ledger (ts, epoch, miner_id, delta_i64, reason) VALUES (?,?,?,?,?)",
@@ -572,7 +641,12 @@ def utxo_transfer():
         'to_address': to_address,
         # FIX(#2867 M2 follow-up): Decimal isn't JSON-serializable; cast to float.
         'amount_rtc': float(amount_rtc),
-        'fee_rtc': float(fee_rtc),
+        'fee_nrtc': effective_fee_nrtc,
+        'fee_rtc': _nrtc_to_rtc_float(effective_fee_nrtc),
+        'requested_fee_nrtc': fee_nrtc,
+        'requested_fee_rtc': _nrtc_to_rtc_float(fee_nrtc),
+        'absorbed_fee_nrtc': absorbed_fee_nrtc,
+        'absorbed_fee_rtc': _nrtc_to_rtc_float(absorbed_fee_nrtc),
         'inputs_consumed': len(selected),
         'outputs_created': len(outputs),
         'change_nrtc': change_nrtc,

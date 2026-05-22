@@ -84,6 +84,25 @@ def _limit_for_identity(github_username: str | None, account_age_days: int | Non
     return 1.0
 
 
+def _request_data() -> tuple[dict[str, Any] | None, tuple[Any, int] | None]:
+    data = request.get_json(silent=True)
+    if data is None:
+        return request.form.to_dict() or {}, None
+    if not isinstance(data, dict):
+        return None, (jsonify({"ok": False, "error": "json_object_required"}), 400)
+    return data, None
+
+
+def _strip_string_field(data: dict[str, Any], name: str) -> tuple[str | None, tuple[Any, int] | None]:
+    value = data.get(name)
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, (jsonify({"ok": False, "error": f"{name}_must_be_string"}), 400)
+    value = value.strip()
+    return value or None, None
+
+
 def _sum_last_24h(conn: sqlite3.Connection, github_username: str | None, ip: str) -> float:
     since = (_utcnow() - timedelta(hours=24)).isoformat()
     if github_username:
@@ -133,7 +152,7 @@ def _transfer(wallet: str, amount: float, cfg: dict[str, Any]) -> tuple[bool, di
 
     resp = requests.post(cfg["ADMIN_TRANSFER_URL"], json=payload, headers=headers, timeout=15)
     if resp.status_code >= 300:
-        return False, {"error": f"transfer_failed_{resp.status_code}", "body": resp.text}
+        return False, {"error": f"transfer_failed_{resp.status_code}"}
     try:
         return True, resp.json()
     except Exception:
@@ -161,9 +180,15 @@ def create_app(config: dict[str, Any] | None = None) -> Flask:
 
     @app.post("/faucet/drip")
     def faucet_drip():
-        data = request.get_json(silent=True) or request.form.to_dict() or {}
-        wallet = (data.get("wallet") or "").strip()
-        github_username = (data.get("github_username") or "").strip() or None
+        data, error = _request_data()
+        if error:
+            return error
+        wallet, error = _strip_string_field(data, "wallet")
+        if error:
+            return error
+        github_username, error = _strip_string_field(data, "github_username")
+        if error:
+            return error
         ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
 
         if not wallet:

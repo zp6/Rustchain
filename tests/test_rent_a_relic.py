@@ -221,6 +221,38 @@ class TestReservationFlow:
         assert cr.status_code == 400
         assert cr.json["error"] == "JSON object required"
 
+    @pytest.mark.parametrize("output_hash", [["not-a-string"], {"hash": "abc"}, 123, True])
+    def test_complete_rejects_non_string_output_hash(self, app, output_hash):
+        r = app.post("/relic/reserve", json={
+            "agent_id": "agent_bad_output_hash", "machine_id": "riscv-hifive",
+            "duration_hours": 1, "rtc_amount": 10.0,
+        })
+        assert r.status_code == 201
+
+        cr = complete_session(app, r.json["session_id"], {"output_hash": output_hash})
+
+        assert cr.status_code == 400
+        assert cr.json["error"] == "output_hash must be a string"
+        sr = app.get(f"/relic/reservation/{r.json['session_id']}")
+        assert sr.json["status"] == "active"
+        assert sr.json["escrow"]["status"] == "locked"
+
+    @pytest.mark.parametrize("output_hash", ["abc", "g" * 64])
+    def test_complete_rejects_invalid_sha256_output_hash(self, app, output_hash):
+        r = app.post("/relic/reserve", json={
+            "agent_id": "agent_malformed_output_hash", "machine_id": "riscv-hifive",
+            "duration_hours": 1, "rtc_amount": 10.0,
+        })
+        assert r.status_code == 201
+
+        cr = complete_session(app, r.json["session_id"], {"output_hash": output_hash})
+
+        assert cr.status_code == 400
+        assert cr.json["error"] == "output_hash must be a 64-character SHA-256 hex digest"
+        sr = app.get(f"/relic/reservation/{r.json['session_id']}")
+        assert sr.json["status"] == "active"
+        assert sr.json["escrow"]["status"] == "locked"
+
     def test_status_endpoint(self, app):
         r = app.post("/relic/reserve", json={
             "agent_id": "agent_stat", "machine_id": "g4-quicksilver",
@@ -237,6 +269,26 @@ class TestReservationFlow:
             "machine_id": "g3-beige", "duration_hours": 1, "rtc_amount": 4.0,
         })
         assert resp.status_code == 400
+
+    def test_reserve_rejects_non_string_agent_id(self, app):
+        resp = app.post("/relic/reserve", json={
+            "agent_id": ["agent"],
+            "machine_id": "g3-beige",
+            "duration_hours": 1,
+            "rtc_amount": 4.0,
+        })
+        assert resp.status_code == 400
+        assert resp.json["error"] == "agent_id must be a string"
+
+    def test_reserve_rejects_non_string_machine_id(self, app):
+        resp = app.post("/relic/reserve", json={
+            "agent_id": "agent-a",
+            "machine_id": {"machine": "g3-beige"},
+            "duration_hours": 1,
+            "rtc_amount": 4.0,
+        })
+        assert resp.status_code == 400
+        assert resp.json["error"] == "machine_id must be a string"
 
     def test_reserve_rejects_non_object_json(self, app):
         resp = app.post("/relic/reserve", json=["not", "object"])
@@ -257,6 +309,37 @@ class TestReservationFlow:
         })
         assert resp.status_code == 400
         assert "RTC" in resp.json["error"]
+
+    def test_reserve_rejects_boolean_duration_hours(self, app):
+        resp = app.post("/relic/reserve", json={
+            "agent_id": "bool-duration",
+            "machine_id": "g3-beige",
+            "duration_hours": True,
+            "rtc_amount": 4.0,
+        })
+        assert resp.status_code == 400
+        assert "duration_hours" in resp.json["error"]
+
+    def test_reserve_rejects_boolean_rtc_amount(self, app):
+        resp = app.post("/relic/reserve", json={
+            "agent_id": "bool-rtc",
+            "machine_id": "g3-beige",
+            "duration_hours": 1,
+            "rtc_amount": False,
+        })
+        assert resp.status_code == 400
+        assert resp.json["error"] == "rtc_amount must be a positive number"
+
+    def test_reserve_rejects_non_finite_rtc_amount(self, app):
+        for amount in (float("nan"), float("inf"), float("-inf")):
+            resp = app.post("/relic/reserve", json={
+                "agent_id": "finite-rtc",
+                "machine_id": "g3-beige",
+                "duration_hours": 1,
+                "rtc_amount": amount,
+            })
+            assert resp.status_code == 400
+            assert resp.json["error"] == "rtc_amount must be a positive number"
 
 
 class TestEscrow:

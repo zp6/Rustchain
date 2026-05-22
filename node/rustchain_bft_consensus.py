@@ -798,7 +798,7 @@ class BFTConsensus:
             # Check if we have quorum for view change
             self._check_view_change_quorum(new_view)
 
-    def handle_view_change(self, msg_data: Dict):
+    def handle_view_change(self, msg_data: Dict) -> Tuple[bool, str, int]:
         """Handle received VIEW-CHANGE message"""
         with self.lock:
             new_view = msg_data.get('view')
@@ -808,9 +808,17 @@ class BFTConsensus:
             epoch = msg_data.get('epoch', 0)
 
             # -- Validation: reject garbage / missing fields -----------------
-            if not all([new_view, node_id, signature, timestamp]):
+            required_fields = (
+                'view',
+                'epoch',
+                'node_id',
+                'prepared_cert',
+                'signature',
+                'timestamp',
+            )
+            if any(field not in msg_data for field in required_fields):
                 logging.warning("[VIEW-CHANGE] Rejected: missing required fields")
-                return
+                return False, "missing required fields", 400
 
             # Must be requesting a *higher* view than current
             if new_view <= self.current_view:
@@ -818,7 +826,7 @@ class BFTConsensus:
                     f"[VIEW-CHANGE] Rejected stale view {new_view} "
                     f"(<= current {self.current_view})"
                 )
-                return
+                return False, "stale view", 400
 
             # -- Verify HMAC signature (same format as _trigger_view_change) --
             sign_data = (
@@ -828,7 +836,7 @@ class BFTConsensus:
                 logging.warning(
                     f"[VIEW-CHANGE] Invalid signature from {node_id}"
                 )
-                return
+                return False, "invalid signature", 401
 
             # -- Timestamp freshness -----------------------------------------
             if abs(time.time() - timestamp) > CONSENSUS_MESSAGE_TTL:
@@ -836,7 +844,7 @@ class BFTConsensus:
                     f"[VIEW-CHANGE] Stale message from {node_id} "
                     f"(age={int(time.time()) - timestamp}s)"
                 )
-                return
+                return False, "stale message", 400
 
             # -- Passed all checks, store ------------------------------------
             if new_view not in self.view_change_log:
@@ -847,6 +855,7 @@ class BFTConsensus:
                 logging.info(f"[VIEW-CHANGE] Received from {node_id} for view {new_view}")
 
             self._check_view_change_quorum(new_view)
+            return True, "", 200
 
     def _check_view_change_quorum(self, new_view: int):
         """Check if we have quorum for view change"""
@@ -1025,6 +1034,9 @@ def create_bft_routes(app, bft: BFTConsensus):
     def _missing_fields(data: Dict, required: Iterable[str]) -> List[str]:
         return [field for field in required if field not in data]
 
+    def _internal_error_response(message: str, status_code: int):
+        return jsonify({'error': message}), status_code
+
     @app.route('/bft/status', methods=['GET'])
     def bft_status():
         """Get BFT consensus status"""
@@ -1049,9 +1061,9 @@ def create_bft_routes(app, bft: BFTConsensus):
 
             bft.receive_message(msg_data)
             return jsonify({'status': 'ok'})
-        except Exception as e:
-            logging.error(f"BFT message error: {e}")
-            return jsonify({'error': str(e)}), 400
+        except Exception:
+            logging.exception("BFT message error")
+            return _internal_error_response('BFT message processing failed', 400)
 
     @app.route('/bft/view_change', methods=['POST'])
     def bft_view_change():
@@ -1063,34 +1075,49 @@ def create_bft_routes(app, bft: BFTConsensus):
 
             missing = _missing_fields(
                 msg_data,
-                ('view', 'epoch', 'node_id', 'signature', 'timestamp'),
+                ('view', 'epoch', 'node_id', 'prepared_cert', 'signature', 'timestamp'),
             )
             if missing:
                 return jsonify({'error': f"missing required fields: {', '.join(missing)}"}), 400
 
-            bft.handle_view_change(msg_data)
+            ok, error, status_code = bft.handle_view_change(msg_data)
+            if not ok:
+                return jsonify({'error': error}), status_code
             return jsonify({'status': 'ok'})
-        except Exception as e:
-            logging.error(f"BFT view change error: {e}")
-            return jsonify({'error': str(e)}), 400
+        except Exception:
+            logging.exception("BFT view change error")
+            return _internal_error_response('BFT view change processing failed', 400)
 
     @app.route('/bft/propose', methods=['POST'])
     def bft_propose():
         """Manually trigger epoch proposal (admin)"""
         try:
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({'error': 'JSON object required'}), 400
             epoch = data.get('epoch')
             miners = data.get('miners', [])
             distribution = data.get('distribution', {})
+
+            if epoch is None:
+                return jsonify({'error': 'Missing epoch field'}), 400
+            if isinstance(epoch, bool) or not isinstance(epoch, int):
+                return jsonify({'error': 'epoch must be an integer'}), 400
+            if epoch < 0:
+                return jsonify({'error': 'epoch must be non-negative'}), 400
+            if not isinstance(miners, list):
+                return jsonify({'error': 'miners must be a list'}), 400
+            if not isinstance(distribution, dict):
+                return jsonify({'error': 'distribution must be an object'}), 400
 
             msg = bft.propose_epoch_settlement(epoch, miners, distribution)
             if msg:
                 return jsonify({'status': 'proposed', 'digest': msg.digest})
             else:
                 return jsonify({'error': 'not_leader_or_already_committed'}), 400
-        except Exception as e:
-            logging.error(f"BFT propose error: {e}")
-            return jsonify({'error': str(e)}), 500
+        except Exception:
+            logging.exception("BFT propose error")
+            return _internal_error_response('BFT proposal failed', 500)
 
 
 # ============================================================================

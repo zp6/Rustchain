@@ -21,7 +21,7 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,7 +30,6 @@ from machine_passport import (
     MachinePassport,
     MachinePassportLedger,
     compute_machine_id,
-    init_machine_passport_schema,
     generate_qr_code,
     generate_passport_pdf,
 )
@@ -499,6 +498,33 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(data['ok'])
         self.assertEqual(data['count'], 0)
+
+    def test_list_passports_rejects_non_integer_limit(self):
+        """Non-integer limits are invalid for list pagination."""
+        resp = self.client.get('/api/machine-passport?limit=abc')
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error'], 'limit must be an integer')
+
+    def test_list_passports_rejects_negative_offset(self):
+        """Negative offsets are invalid for list pagination."""
+        resp = self.client.get('/api/machine-passport?offset=-1')
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error'], 'offset must be non-negative')
+
+    def test_list_passports_clamps_large_limit(self):
+        """Large list limits are clamped to the documented maximum."""
+        resp = self.client.get('/api/machine-passport?limit=999')
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['limit'], 500)
     
     def test_create_passport_fails_closed_without_admin_key(self):
         """Passport creation is disabled when ADMIN_KEY is not configured."""
@@ -540,6 +566,22 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(data['ok'])
         self.assertIn('machine_id', data)
+
+    def test_create_passport_rejects_non_object_json(self):
+        """Passport creation requires a JSON object body."""
+        os.environ['ADMIN_KEY'] = 'expected-admin-key'
+
+        resp = self.client.post(
+            '/api/machine-passport',
+            headers={'X-Admin-Key': 'expected-admin-key'},
+            json=['name', 'owner_miner_id'],
+        )
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error'], 'invalid_request')
+        self.assertEqual(data['message'], 'JSON object required')
 
     def test_update_passport_rejects_owner_claim_without_admin_key(self):
         """Client-supplied owner_miner_id is not proof of ownership."""
@@ -598,6 +640,31 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(data['ok'])
         compare_digest.assert_called_once_with(b'expected-admin-key', b'expected-admin-key')
+
+    def test_update_passport_rejects_non_object_json(self):
+        """Passport updates require a JSON object body."""
+        os.environ['ADMIN_KEY'] = 'expected-admin-key'
+        self.client.post(
+            '/api/machine-passport',
+            headers={'X-Admin-Key': 'expected-admin-key'},
+            json={
+                'name': 'Array Update Test',
+                'owner_miner_id': 'miner_owner',
+                'machine_id': 'array_update_test',
+            },
+        )
+
+        resp = self.client.put(
+            '/api/machine-passport/array_update_test',
+            headers={'X-Admin-Key': 'expected-admin-key'},
+            json=['name', 'Unauthorized Rename'],
+        )
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error'], 'invalid_request')
+        self.assertEqual(data['message'], 'JSON object required')
 
     def test_update_passport_fails_closed_without_admin_key(self):
         """Passport updates fail closed before resource lookup when ADMIN_KEY is missing."""
@@ -674,6 +741,19 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertFalse(data['ok'])
         self.assertEqual(data['error'], 'passport_not_found')
+
+    def test_compute_machine_id_rejects_non_object_json(self):
+        """Machine ID computation requires fingerprint JSON objects."""
+        resp = self.client.post(
+            '/api/machine-passport/compute-machine-id',
+            json=['serial', 'logic-board-id'],
+        )
+        data = json.loads(resp.data)
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error'], 'invalid_request')
+        self.assertEqual(data['message'], 'JSON object required')
 
 
 class TestIntegration(unittest.TestCase):

@@ -33,6 +33,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SQLITE_INT64_MAX = 9_223_372_036_854_775_807
+
 
 # =============================================================================
 # DATABASE SCHEMA UPGRADES
@@ -109,6 +111,8 @@ class TransactionPool:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
+            self._recover_interrupted_balances_migration(cursor)
+
             # Base case: create the balances table if it doesn't exist at all.
             # The migration steps below assume the table already exists (ALTER TABLE,
             # PRAGMA table_info, etc.), so a fresh empty DB would fail without this.
@@ -169,6 +173,27 @@ class TransactionPool:
                             logger.warning(f"Schema statement failed: {e}")
 
             conn.commit()
+
+    def _recover_interrupted_balances_migration(self, cursor) -> None:
+        """Recover balances after a crash between SQLite table renames."""
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('balances', 'balances_old', 'balances_new')"
+        )
+        tables = {row[0] for row in cursor.fetchall()}
+
+        if "balances" in tables:
+            return
+
+        if "balances_new" in tables:
+            cursor.execute("ALTER TABLE balances_new RENAME TO balances")
+            cursor.execute("DROP TABLE IF EXISTS balances_old")
+            logger.warning("Recovered interrupted balances migration from balances_new")
+            return
+
+        if "balances_old" in tables:
+            cursor.execute("ALTER TABLE balances_old RENAME TO balances")
+            logger.warning("Recovered interrupted balances migration from balances_old")
 
     @contextmanager
     def _get_connection(self):
@@ -670,11 +695,21 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
     """
     from flask import request, jsonify
 
+    def internal_error(route_name: str):
+        logger.exception("Internal error in %s", route_name)
+        return jsonify({"error": "internal_error"}), 500
+
     @app.route('/tx/submit', methods=['POST'])
     def submit_transaction():
         """Submit a signed transaction"""
         try:
-            data = request.get_json()
+            data = request.get_json(silent=True)
+
+            if data is None:
+                return jsonify({"error": "No JSON data provided"}), 400
+
+            if not isinstance(data, dict):
+                return jsonify({"error": "JSON object required"}), 400
 
             if not data:
                 return jsonify({"error": "No JSON data provided"}), 400
@@ -701,9 +736,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
                     "error": result
                 }), 400
 
-        except Exception as e:
-            logger.error(f"Error submitting transaction: {e}")
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("submit_transaction")
 
     @app.route('/tx/status/<tx_hash>', methods=['GET'])
     def get_tx_status(tx_hash: str):
@@ -711,8 +745,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
         try:
             status = tx_pool.get_transaction_status(tx_hash)
             return jsonify(status)
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("get_tx_status")
 
     @app.route('/tx/pending', methods=['GET'])
     def list_pending():
@@ -737,8 +771,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
                 "count": len(pending),
                 "transactions": [tx.to_dict() for tx in pending]
             })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("list_pending")
 
     @app.route('/wallet/<address>/balance', methods=['GET'])
     def get_wallet_balance(address: str):
@@ -756,8 +790,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
                 "balance_rtc": balance / 100_000_000,
                 "available_rtc": available / 100_000_000
             })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("get_wallet_balance")
 
     @app.route('/wallet/<address>/nonce', methods=['GET'])
     def get_wallet_nonce(address: str):
@@ -777,8 +811,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
                 "next_nonce": next_nonce,
                 "pending_nonces": sorted(pending_nonces)
             })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("get_wallet_nonce")
 
     @app.route('/wallet/<address>/history', methods=['GET'])
     def get_wallet_history(address: str):
@@ -801,6 +835,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
             
             if offset < 0:
                 offset = 0
+            if offset > SQLITE_INT64_MAX:
+                return jsonify({"error": "offset exceeds SQLite integer maximum"}), 400
 
             with sqlite3.connect(tx_pool.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -821,8 +857,8 @@ def create_tx_api_routes(app, tx_pool: TransactionPool):
                 "count": len(transactions),
                 "transactions": transactions
             })
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception:
+            return internal_error("get_wallet_history")
 
 
 # =============================================================================

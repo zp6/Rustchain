@@ -79,7 +79,10 @@ setup_python() {
         fi
     fi
     V=$(python3 -c "import sys; print(sys.version_info.minor)")
-    [ "$V" -lt 8 ] && { echo -e "${RED}[!] Python 3.8+ required (Found 3.$V)${NC}"; exit 1; }
+    if [ "$V" -lt 8 ]; then
+        echo -e "${RED}[!] Python 3.8+ required (Found 3.$V)${NC}"
+        exit 1
+    fi
 }
 
 setup_python
@@ -89,14 +92,29 @@ run_cmd mkdir -p "$INSTALL_DIR"
 verify_sum() {
     [ "$SKIP_CHECKSUM" = true ] && return 0
     local file=$1; local expected=$2
-    local actual=$(sha256sum "$file" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$file" 2>/dev/null | cut -d' ' -f1)
+    local actual=$( (sha256sum "$file" 2>/dev/null || shasum -a 256 "$file" 2>/dev/null) | cut -d' ' -f1)
     if [ "$actual" = "$expected" ]; then return 0; else echo -e "${RED}[!] Checksum fail: $file${NC}"; return 1; fi
 }
 
+checksum_for() {
+    local artifact=$1
+    local expected
+    expected=$(awk -v path="$artifact" '$2 == path { print $1; found=1; exit } END { if (!found) exit 1 }' sums)
+    if [ -z "$expected" ]; then
+        echo -e "${RED}[!] Missing checksum entry: $artifact${NC}" >&2
+        return 1
+    fi
+    printf '%s' "$expected"
+}
+
 download_miner() {
-    cd "$INSTALL_DIR"
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${CYAN}[DRY-RUN]${NC} Would run: cd $INSTALL_DIR"
+    else
+        cd "$INSTALL_DIR"
+    fi
     case "$PLATFORM" in
-        macos) FILE="macos/rustchain_mac_miner_v2.4.py" ;;
+        macos) FILE="macos/rustchain_mac_miner_v2.5.py" ;;
         rpi|linux) FILE="linux/rustchain_linux_miner.py" ;;
         *) FILE="linux/rustchain_linux_miner.py" ;;
     esac
@@ -106,8 +124,12 @@ download_miner() {
     run_cmd curl -sSL "$REPO_BASE/linux/fingerprint_checks.py" -o fingerprint_checks.py
     
     if [ "$SKIP_CHECKSUM" != true ] && [ "$DRY_RUN" != true ]; then
-        curl -sSL "$CHECKSUM_URL" -o sums 2>/dev/null || true
-        [ -f sums ] && { SUM=$(grep "$(basename $FILE)" sums | awk '{print $1}'); [ -n "$SUM" ] && verify_sum "rustchain_miner.py" "$SUM"; rm sums; }
+        curl -fsSL "$CHECKSUM_URL" -o sums
+        MINER_SUM=$(checksum_for "$FILE")
+        FINGERPRINT_SUM=$(checksum_for "linux/fingerprint_checks.py")
+        verify_sum "rustchain_miner.py" "$MINER_SUM"
+        verify_sum "fingerprint_checks.py" "$FINGERPRINT_SUM"
+        rm -f sums
     fi
 }
 
