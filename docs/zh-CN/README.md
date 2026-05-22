@@ -12,13 +12,13 @@
 [![Stars](https://img.shields.io/github/stars/Scottcjn/Rustchain?style=flat&color=gold)](https://github.com/Scottcjn/Rustchain/stargazers)
 [![Nodes](https://img.shields.io/badge/Nodes-5%20Active-brightgreen)](https://rustchain.org/explorer/)
 [![DePIN](https://img.shields.io/badge/DePIN-Vintage%20Hardware-8B4513)](https://rustchain.org)
-[![Proof of Antiquity](https://img.shields.io/badge/Consensus-Proof%20of%20Antiquity-DAA520)](docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
+[![Proof of Antiquity](https://img.shields.io/badge/Consensus-Proof%20of%20Antiquity-DAA520)](../../docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.19442753-blue)](https://doi.org/10.5281/zenodo.19442753)
 
 一台 2003 年的 PowerBook G4 的收益是现代 Threadripper 的 **2.5 倍**。
 一台 Power Mac G5 的收益是 **2.0 倍**。而一台串口生锈的 486 赢得的尊重比谁都多。
 
-[浏览器](https://rustchain.org/explorer/) · [被保护的机器](https://rustchain.org/preserved.html) · [安装矿工](#quickstart) · [新手指南](docs/QUICKSTART.md) · [宣言](https://rustchain.org/manifesto.html) · [白皮书](docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
+[浏览器](https://rustchain.org/explorer/) · [被保护的机器](https://rustchain.org/preserved.html) · [安装矿工](#quickstart) · [新手指南](../../docs/QUICKSTART.md) · [宣言](https://rustchain.org/manifesto.html) · [白皮书](../../docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
 
 </div>
 
@@ -247,7 +247,7 @@ curl -fsS https://rustchain.org/epoch           # 当前 epoch
 | 横跨 3 个大洲的 5 个节点（北美 ×3，亚洲 ×1，本地 ×1） | [实时浏览器](https://rustchain.org/explorer/) |
 | 26+ 矿工在认证 | `curl -fsS https://rustchain.org/api/miners` |
 | 已颁发 44 份 BCOS 证书 | [认证仓库](https://rustchain.org/bcos/) |
-| 每台机器 6 项硬件指纹检测 | [指纹文档](docs/attestation_fuzzing.md) |
+| 每台机器 6 项硬件指纹检测 | [指纹文档](../../docs/attestation_fuzzing.md) |
 | 已向 260+ 贡献者支付 25,875+ RTC | [公开账本](https://github.com/Scottcjn/rustchain-bounties/issues/104) |
 | 代码已合入 OpenSSL | [#30437](https://github.com/openssl/openssl/pull/30437)，[#30452](https://github.com/openssl/openssl/pull/30452) |
 | 在 CPython、curl、wolfSSL、Ghidra、vLLM 有待合并 PR | [作品集](https://github.com/Scottcjn/Scottcjn/blob/main/external-pr-portfolio.md) |
@@ -286,7 +286,7 @@ launchctl list | grep rustchain
 tail -f ~/.rustchain/miner.log
 ```
 
-**RustChain 新手？** 阅读[分步新手指南](docs/QUICKSTART.md)——从安装到获得你的第一枚 RTC，每个命令都有详细解释。
+**RustChain 新手？** 阅读[分步新手指南](../../docs/QUICKSTART.md)——从安装到获得你的第一枚 RTC，每个命令都有详细解释。
 
 ---
 
@@ -294,9 +294,9 @@ tail -f ~/.rustchain/miner.log
 
 开发者可以从全新检出开始，在本地构建和运行 RustChain：
 
-1. 安装先决条件并运行 Python/Rust 检查，参考[构建指南](docs/BUILD.md)。
-2. 启动单节点本地开发网络，参考[本地 Devnet](docs/DEVNET.md)。
-3. 创建开发钱包并模拟转账，参考 [CLI 钱包演练](docs/CLI.md)。
+1. 安装先决条件并运行 Python/Rust 检查，参考[构建指南](../../docs/BUILD.md)。
+2. 启动单节点本地开发网络，参考[本地 Devnet](../../docs/DEVNET.md)。
+3. 创建开发钱包并模拟转账，参考 [CLI 钱包演练](../../docs/CLI.md)。
 
 这些指南将本地状态保存在 `.dev/` 中，并使用显式的 `--manifest-path` 命令，因为仓库包含多个 Python 和 Rust 子项目。
 
@@ -309,17 +309,17 @@ RustChain 有两种钱包概念：
 - **矿工钱包 ID**：一个可读的 `miner_id`，用于挖矿奖励和余额查询。
 - **`RTC...` 地址**：一个基于 Ed25519 的地址，用于签名转账。
 
-如果你不确定需要哪个，请先阅读[钱包设置指南](docs/WALLET_SETUP.md)。
+如果你不确定需要哪个，请先阅读[钱包设置指南](../../docs/WALLET_SETUP.md)。
 
 | 选项 | 用途 | 位置 |
 |---|---|---|
 | 矿工安装钱包 | 将挖矿奖励赚到指定钱包 | `install-miner.sh --wallet YOUR_WALLET` |
-| 浏览器轻客户端 | 在浏览器中本地加载钱包并签署转账 | [web/light-client](web/light-client/) |
+| 浏览器轻客户端 | 在浏览器中本地加载钱包并签署转账 | [web/light-client](../../web/light-client/) |
 | 桌面 GUI 钱包 | 从本仓库创建或恢复本地钱包 | `wallet/rustchain_wallet_secure.py` |
 | CLI 工具 | 从检出目录进行脚本化钱包操作 | `tools/rustchain_wallet_cli.py` |
-| Agent/Base 钱包文档 | Coinbase Agentic Wallets、x402 和 Base 链接 | [web/wallets.html](web/wallets.html) |
+| Agent/Base 钱包文档 | Coinbase Agentic Wallets、x402 和 Base 链接 | [web/wallets.html](../../web/wallets.html) |
 
-关于命令示例、备份指南和签名转账载荷格式，请参见 [docs/WALLET_SETUP.md](docs/WALLET_SETUP.md) 和 [START_HERE.md](START_HERE.md)。
+关于命令示例、备份指南和签名转账载荷格式，请参见 [docs/WALLET_SETUP.md](../../docs/WALLET_SETUP.md) 和 [START_HERE.md](../../START_HERE.md)。
 
 ---
 
@@ -366,7 +366,7 @@ G5 Mac (2.0x):     0.24 RTC  ████████████████
 | **兑换** | [Raydium DEX](https://raydium.io/swap/?inputMint=sol&outputMint=12TAdKXxcGf6oCv4rqDz2NkgxjyHq6HQKoxKZYGf5i4X) |
 | **K 线图** | [DexScreener](https://dexscreener.com/solana/8CF2Q8nSCxRacDShbtF86XTSrYjueBMKmfdR3MLdnYzb) |
 | **桥接** | [Bridge](https://bottube.ai/bridge/wrtc) |
-| **指南** | [wRTC 快速开始](docs/wrtc.md) |
+| **指南** | [wRTC 快速开始](../../docs/wrtc.md) |
 
 ---
 
