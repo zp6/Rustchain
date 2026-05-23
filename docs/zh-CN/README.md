@@ -13,7 +13,7 @@
 一台 2003 年的 PowerBook G4 的收益是现代 Threadripper 的 **2.5 倍**。
 一台 Power Mac G5 的收益是 **2.0 倍**。而一台串口生锈的 486 赢得的尊重比谁都多。
 
-[浏览器](https://rustchain.org/explorer/) · [被保护的机器](https://rustchain.org/preserved.html) · [安装矿工](#quickstart) · [新手指南](../../docs/QUICKSTART.md) · [宣言](https://rustchain.org/manifesto.html) · [白皮书](../../docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
+[浏览器](https://rustchain.org/explorer/) · [被保护的机器](https://rustchain.org/preserved.html) · [安装矿工](#快速开始) · [新手指南](../../docs/QUICKSTART.md) · [宣言](https://rustchain.org/manifesto.html) · [白皮书](../../docs/RustChain_Whitepaper_Flameholder_v0.97.pdf)
 
 </div>
 
