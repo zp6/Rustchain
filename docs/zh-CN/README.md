@@ -8,7 +8,7 @@
 **而所有硬件终将变老，这只是时间问题。**
 
 [![CI](https://github.com/Scottcjn/Rustchain/actions/workflows/ci.yml/badge.svg)](https://github.com/Scottcjn/Rustchain/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](../../LICENSE)
 
 一台 2003 年的 PowerBook G4 的收益是现代 Threadripper 的 **2.5 倍**。
 一台 Power Mac G5 的收益是 **2.0 倍**。而一台串口生锈的 486 赢得的尊重比谁都多。
@@ -375,7 +375,7 @@ G5 Mac (2.0x):     0.24 RTC  ████████████████
 | Major（重大） | 75-100 RTC | 安全修复、共识改进 |
 | Critical（关键） | 100-150 RTC | 漏洞、协议升级 |
 
-**1 RTC ≈ $0.10 USD** · `pip install clawrtc` · [CONTRIBUTING.md](CONTRIBUTING.md)
+**1 RTC ≈ $0.10 USD** · `pip install clawrtc` · [CONTRIBUTING.md](../../CONTRIBUTING.md)
 
 ---
 
@@ -427,7 +427,7 @@ Linux（x86_64、ppc64le）· macOS（Intel、Apple Silicon、PowerPC）· IBM P
 
 
 ## 贡献
-请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南，查看[悬赏板](https://github.com/Scottcjn/rustchain-bounties)了解活跃任务和奖励。
+请阅读 [CONTRIBUTING.md](../../CONTRIBUTING.md) 了解指南，查看[悬赏板](https://github.com/Scottcjn/rustchain-bounties)了解活跃任务和奖励。
 
 
 ---
